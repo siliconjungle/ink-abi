@@ -94,7 +94,7 @@ pub fn packed_width(t: &Value) -> Result<usize, String> {
     } else {
         t
     };
-    validate_flat(inner, false, 0)?;
+    validate_flat(inner, 0)?;
     let n = width(inner, 0)?;
     if n == 0 {
         return Err("packed width must be nonzero".into());
