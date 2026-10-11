@@ -14,3 +14,6 @@ extern bool ink_tick(InkContext*);
 extern uint64_t ink_error(InkContext*,const char*);
 extern uint64_t ink_finish_action(InkContext*,uint64_t);
 uint64_t ink_program_call(InkContext*,uint32_t,uint32_t,const uint64_t*,size_t);
+
+typedef uint64_t (*InkParallelCallback)(InkContext*,uint32_t,uint64_t,const uint64_t*);
+extern uint64_t ink_parallel(InkContext*,uint64_t,uint32_t,uint32_t,const uint64_t*,size_t,uint32_t);
