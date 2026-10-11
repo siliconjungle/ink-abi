@@ -129,18 +129,18 @@ fn width(t: &Value, depth: usize) -> Result<usize, String> {
     }
 }
 
-fn validate_flat(t: &Value, gpu: bool, depth: usize) -> Result<(), String> {
+fn validate_flat(t: &Value, depth: usize) -> Result<(), String> {
     if depth > MAX_TYPE_DEPTH {
         return Err("packed value type depth exceeded".into());
     }
     match t["kind"].as_str() {
         Some("u32" | "i32" | "f32" | "bool") => Ok(()),
-        Some("u64") if !gpu => Ok(()),
+        Some("u64") => Ok(()),
         Some("vector") => {
             if t["size"].as_u64().is_none_or(|n| n == 0) {
                 return Err("invalid vector size".into());
             }
-            validate_flat(&t["element"], gpu, depth + 1)
+            validate_flat(&t["element"], depth + 1)
         }
         Some("record") => {
             let fs = t["fields"].as_array().ok_or("missing ABI fields")?;
@@ -153,17 +153,17 @@ fn validate_flat(t: &Value, gpu: bool, depth: usize) -> Result<(), String> {
                 if !names.insert(name) {
                     return Err("duplicate ABI field".into());
                 }
-                validate_flat(&f["type"], gpu, depth + 1)?;
+                validate_flat(&f["type"], depth + 1)?;
             }
             Ok(())
         }
         _ => {
-            Err("packed compute values must be flat; GPU values use only 32-bit components".into())
+            Err("packed compute values must be flat numeric components".into())
         }
     }
 }
-pub fn flat_width(t: &Value, gpu: bool) -> Result<usize, String> {
-    validate_flat(t, gpu, 0)?;
+pub fn flat_width(t: &Value) -> Result<usize, String> {
+    validate_flat(t, 0)?;
     packed_width(t)
 }
 
