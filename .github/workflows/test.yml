@@ -1,0 +1,16 @@
+name: ABI conformance
+on: [push, pull_request]
+jobs:
+  conformance:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+      - run: sha256sum -c selection.sources.sha256
+      - run: cargo test --locked
+      - run: tools/build-selection.sh && cargo test --locked
