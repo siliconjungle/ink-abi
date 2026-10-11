@@ -19,5 +19,10 @@ uint32_t lang_checkpoint(uint32_t state);
 uint32_t lang_restore(uint32_t snapshot);
 uint32_t lang_events(uint32_t state);
 uint32_t lang_acknowledge(uint32_t state, uint64_t commit, uint64_t position);
+/* Optional ABI-v1 retained operation extension: begin returns 1 when retained,
+   2 when unsupported, 0 on error. Commit/rollback return 1 on success. */
+uint32_t lang_transaction_begin(uint32_t state);
+uint32_t lang_transaction_commit(uint32_t state);
+uint32_t lang_transaction_rollback(uint32_t state);
 uint64_t lang_version(uint32_t state);
 #endif
