@@ -174,8 +174,8 @@ mod tests {
     fn nested_layout_and_nominal_recursion() {
         let records = json!({"R":[["x","U64"],["v",{"Vector":["F32",3]}]]});
         let d = describe(&json!({"Named":"R"}), &records, &json!({}), &json!([])).unwrap();
-        assert_eq!(flat_width(&d, false).unwrap(), 5);
-        assert!(flat_width(&d, true).is_err());
+        assert_eq!(flat_width(&d).unwrap(), 5);
+        assert_eq!(packed_width(&d).unwrap(), 5);
         let recursive = json!({"Node":[["next",{"Option":{"Named":"Node"}}]]});
         let d = describe(&json!({"Named":"Node"}), &recursive, &json!({}), &json!([])).unwrap();
         assert_eq!(d["fields"][0]["type"]["element"]["kind"], "ref");
