@@ -28,3 +28,9 @@ Run `cargo test --locked` with Node available. To rebuild browser decisions, ins
 `wasm32-unknown-unknown` and run `tools/build-selection.sh`. The committed Wasm and
 source fingerprint travel together; CI checks the fingerprint, tests that artifact,
 then rebuilds and repeats conformance. A compiler upgrade may change Wasm bytes.
+
+The literal C value ABI includes invocation-local frame tokens. Finishing a frame
+retains one returned handle and all handles from before its mark, and discards
+other transient handles. Tokens are private to emitted code; callers must not
+retain discarded handles. Frames do not change table state, events, journals or
+logical snapshot types. Operational implementations remain trusted.
