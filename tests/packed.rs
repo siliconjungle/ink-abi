@@ -71,5 +71,8 @@ fn packed_words_match_javascript_for_every_flat_carrier_and_rejections() {
         "{}",
         String::from_utf8_lossy(&run.stderr)
     );
+    std::fs::write(dir.join("native.mjs"), include_str!("fixtures/native-destination.mjs")).unwrap();
+    let native = std::process::Command::new("node").arg(dir.join("native.mjs")).output().unwrap();
+    assert!(native.status.success(), "{}", String::from_utf8_lossy(&native.stderr));
     std::fs::remove_dir_all(dir).unwrap();
 }

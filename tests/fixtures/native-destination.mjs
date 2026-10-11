@@ -1,0 +1,11 @@
+import assert from 'node:assert/strict';
+import {pack,unpack} from './packed.mjs';
+const word={kind:'list',element:{kind:'u32'}},wide={kind:'list',element:{kind:'u64'}},float={kind:'list',element:{kind:'f32'}};
+const proxy=new Proxy(Uint32Array.of(0xffffffff,3),{ownKeys(){throw Error('do not enumerate packed words')},get(target,key){const value=Reflect.get(target,key,target);return typeof value==='function'?value.bind(target):value;}});
+assert.deepEqual(Array.from(pack(proxy,word).words),[0xffffffff,3]);
+const output=new BigUint64Array([0n,0n,77n]);
+unpack(Uint32Array.of(0,0x200000,0xffffffff,0xffffffff),wide,true,output);
+assert.deepEqual(output,new BigUint64Array([9007199254740992n,18446744073709551615n,77n]));
+const short=new BigUint64Array([42n]);assert.throws(()=>unpack(Uint32Array.of(0,1,0,2),wide,true,short),/capacity/);assert.equal(short[0],42n);
+const bits=[0,0,'tail'];unpack(Uint32Array.of(0x80000000,0x7fc12345),float,true,bits);
+assert.ok(Object.is(bits[0],-0));assert.deepEqual(bits[1],{F32Bits:0x7fc12345});assert.equal(bits[2],'tail');

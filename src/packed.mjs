@@ -13,7 +13,7 @@ export function width(t,depth=0) {
 
 export function pack(v, t) {
   const stride=width(t);
-  if(t.kind==='list'&&(!Array.isArray(v)&&!ArrayBuffer.isView(v)))fail('expected list');
+  if(t.kind==='list'&&(!Array.isArray(v)&&!ArrayBuffer.isView(v)&&!(v instanceof Uint32Array)))fail('expected list');
   if((t.kind==='list'?v.length:1)*stride*4>MAX_BYTES)fail('input exceeds 256 MiB budget');
   if(t.kind === 'list' && t.element.kind === 'u32') {
     if(v.length * 4 > MAX_BYTES) fail('input exceeds 256 MiB budget');
@@ -79,7 +79,7 @@ export function pack(v, t) {
     finite,
   };
 }
-export function unpack(words, t) {
+export function unpack(words, t, native = false, destination = null) {
   const stride=width(t);if(words.length%stride||t.kind!=="list"&&words.length!==stride)fail("invalid result layout");
   let i = 0;
   const view = new DataView(new ArrayBuffer(4));
@@ -88,6 +88,7 @@ export function unpack(words, t) {
       case "list": {
         const n = words.length / width(t.element);
         if (!Number.isInteger(n)) fail("invalid result layout");
+        if(destination){if(destination.length<n)fail("destination capacity");for(let j=0;j<n;j++)destination[j]=go(t.element);return destination;}
         return Array.from({ length: n }, () => go(t.element));
       }
       case "vector":
@@ -102,7 +103,7 @@ export function unpack(words, t) {
         return words[i++] | 0;
       case "u64": {
         const n = BigInt(words[i++]) + (BigInt(words[i++]) << 32n);
-        return n <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(n) : n.toString();
+        return native ? n : n <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(n) : n.toString();
       }
       case "f32":
         view.setUint32(0, words[i++], true);
