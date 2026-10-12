@@ -34,3 +34,8 @@ retains one returned handle and all handles from before its mark, and discards
 other transient handles. Tokens are private to emitted code; callers must not
 retain discarded handles. Frames do not change table state, events, journals or
 logical snapshot types. Operational implementations remain trusted.
+
+## License
+
+Project code and documentation are [MIT licensed](LICENSE). Third-party dependencies,
+vendored projects and research data retain their own licenses and notices.
