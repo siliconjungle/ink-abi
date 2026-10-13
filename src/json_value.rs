@@ -51,13 +51,45 @@ pub fn number_token(s: &str) -> bool {
     }
     i == b.len()
 }
-struct Parser<'a> {
+pub(crate) struct Parser<'a> {
     text: &'a str,
     at: usize,
     nodes: usize,
     limits: Limits,
 }
-impl Parser<'_> {
+impl<'a> Parser<'a> {
+    pub(crate) fn new(text: &'a str, limits: Limits) -> Result<Self, String> {
+        let limits = limits.checked()?;
+        if text.len() > limits.bytes {
+            return Err("JSON byte limit".into());
+        }
+        Ok(Self {
+            text,
+            at: 0,
+            nodes: limits.nodes,
+            limits,
+        })
+    }
+    pub(crate) fn peek(&mut self) -> Option<u8> {
+        self.ws();
+        self.text.as_bytes().get(self.at).copied()
+    }
+    pub(crate) fn node(&mut self, depth: usize) -> Result<(), String> {
+        if depth > self.limits.depth || self.nodes == 0 {
+            return Err("JSON node or depth limit".into());
+        }
+        self.nodes -= 1;
+        Ok(())
+    }
+    pub(crate) fn finish(&mut self) -> Result<(), String> {
+        self.ws();
+        if self.at != self.text.len() {
+            Err("trailing JSON text".into())
+        } else {
+            Ok(())
+        }
+    }
+
     fn ws(&mut self) {
         while self
             .text
@@ -68,7 +100,7 @@ impl Parser<'_> {
             self.at += 1;
         }
     }
-    fn eat(&mut self, c: u8) -> bool {
+    pub(crate) fn eat(&mut self, c: u8) -> bool {
         self.ws();
         if self.text.as_bytes().get(self.at) == Some(&c) {
             self.at += 1;
@@ -77,7 +109,7 @@ impl Parser<'_> {
             false
         }
     }
-    fn string(&mut self) -> Result<String, String> {
+    pub(crate) fn string(&mut self) -> Result<String, String> {
         self.ws();
         let start = self.at;
         if !self.eat(b'"') {
@@ -101,7 +133,7 @@ impl Parser<'_> {
             }
         }
     }
-    fn value(&mut self, depth: usize) -> Result<Json, String> {
+    pub(crate) fn value(&mut self, depth: usize) -> Result<Json, String> {
         if depth > self.limits.depth || self.nodes == 0 {
             return Err("JSON node or depth limit".into());
         }
@@ -477,10 +509,10 @@ impl JsonCodec {
         Json::from_ink(value, limits)?.stringify(limits)
     }
     pub fn parse_binary(&self, text: &str, limits: Limits) -> Result<Vec<u8>, String> {
-        self.schema.encode(&parse(text, limits)?.to_ink(), limits)
+        crate::json_stream::json_binary(&self.schema, text, limits)
     }
     pub fn stringify_binary(&self, bytes: &[u8], limits: Limits) -> Result<String, String> {
-        Json::from_ink(&self.schema.decode(bytes, limits)?, limits)?.stringify(limits)
+        crate::json_stream::json_stringify(&self.schema, bytes, limits)
     }
 }
 impl JsonCodec {

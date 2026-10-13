@@ -138,3 +138,102 @@ fn schema_bound_frames_and_depth_are_checked() {
     bad["identity"] = json!("0".repeat(64));
     assert!(Schema::from_descriptor(&bad).is_err());
 }
+
+#[test]
+fn streaming_matches_carrier_with_reordered_records_recursion_and_limits() {
+    let l = Limits::default();
+    let node = json!({"kind":"record","name":"Node","fields":[{"name":"id","type":{"kind":"id","name":"Key"}},{"name":"v","type":{"kind":"vector","size":2,"element":{"kind":"f32"}}},{"name":"next","type":{"kind":"option","element":{"kind":"ref","name":"Node"}}}]});
+    let s = Schema::new(node.clone(), BTreeMap::from([("Node".into(), node)])).unwrap();
+    let c = TypedJsonCodec::new(s.clone());
+    for text in [
+        r#"{"next":{"None":null},"v":[-0,0.1],"id":"0123456789abcdef0123456789abcdef"}"#,
+        r#"{"v":[1.2,3.4],"next":{"Some":{"next":{"None":null},"id":"0123456789abcdef0123456789abcdef","v":[0,-0]}},"id":"0123456789abcdef0123456789abcdef"}"#,
+    ] {
+        let old = s.encode(&c.parse(text, l).unwrap(), l).unwrap();
+        assert_eq!(c.parse_binary(text, l).unwrap(), old);
+        for limits in [
+            Limits { nodes: 2, ..l },
+            Limits { depth: 1, ..l },
+            Limits { bytes: 50, ..l },
+        ] {
+            assert!(c.parse_binary(text, limits).is_err());
+        }
+    }
+    for text in [
+        r#"{"id":"BAD","v":[1,2],"next":{"None":null}}"#,
+        r#"{"id":"0123456789abcdef0123456789abcdef","v":[1],"next":{"None":null}}"#,
+        r#"{"id":"0123456789abcdef0123456789abcdef","id":"0123456789abcdef0123456789abcdef","v":[1,2],"next":{"None":null}}"#,
+    ] {
+        assert!(c.parse_binary(text, l).is_err());
+    }
+    for (kind, text) in [
+        ("u64", r#""2""#),
+        ("string", "2"),
+        ("u32", "[2]"),
+        ("f32", "1e10000"),
+        ("int", "1.2"),
+    ] {
+        let c = TypedJsonCodec::new(Schema::new(json!({"kind":kind}), BTreeMap::new()).unwrap());
+        assert!(c.parse_binary(text, l).is_err());
+    }
+}
+#[test]
+fn native_frames_borrowed_indexes_and_direct_packing_preserve_bits() {
+    let l = Limits::default();
+    let s = Schema::new(
+        json!({"kind":"list","element":{"kind":"u32"}}),
+        BTreeMap::new(),
+    )
+    .unwrap();
+    let bytes = s
+        .encode_with(l, |w| {
+            w.frame(|w| {
+                w.word(4)?;
+                for n in [0, u32::MAX, 2, 3] {
+                    w.frame(|w| w.word(n))?;
+                }
+                Ok(())
+            })
+        })
+        .unwrap();
+    assert_eq!(bytes, s.encode(&json!([0, u32::MAX, 2, 3]), l).unwrap());
+    let view = s.validate(&bytes, l).unwrap();
+    let index = view.index().unwrap();
+    assert_eq!(index.len(), 4);
+    assert!(index.at(4).unwrap().is_none());
+    assert_eq!(index.retained_bytes(), 16);
+    for i in 0..4 {
+        assert_eq!(
+            index.at(i).unwrap().unwrap().payload(),
+            view.at(i).unwrap().unwrap().payload()
+        );
+    }
+    let packed = ink_abi::wire_packed::pack_flat(view).unwrap();
+    assert_eq!(&*packed.words, &[0, u32::MAX, 2, 3]);
+    let s = Schema::new(
+        json!({"kind":"list","element":{"kind":"f32"}}),
+        BTreeMap::new(),
+    )
+    .unwrap();
+    let raw = [0x80000000, 0x7fc00001, 0x7fa00001, 0xff800000];
+    let bytes = s
+        .encode(
+            &serde_json::Value::Array(raw.map(|n| json!({"F32Bits":n})).into()),
+            l,
+        )
+        .unwrap();
+    let packed = ink_abi::wire_packed::pack_flat(s.validate(&bytes, l).unwrap()).unwrap();
+    assert_eq!(&*packed.words, &raw);
+    assert!(!packed.finite);
+    let s = Schema::new(json!({"kind":"u32"}), BTreeMap::new()).unwrap();
+    assert!(s.encode_with(l, |w| w.frame(|w| w.bytes(&[0]))).is_err());
+    assert!(s
+        .encode_with(Limits { bytes: 44, ..l }, |w| w.frame(|w| w.word(1)))
+        .is_err());
+    assert!(s
+        .encode_with(l, |w| {
+            w.frame(|w| w.word(1))?;
+            w.frame(|w| w.word(2))
+        })
+        .is_err());
+}

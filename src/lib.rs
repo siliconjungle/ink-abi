@@ -210,3 +210,6 @@ pub const VALUE_WIRE_RUST_SOURCE: &str = include_str!("value_wire.rs");
 pub mod wire_contract;
 
 pub mod typed_json;
+
+mod json_stream;
+pub mod wire_packed;

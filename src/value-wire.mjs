@@ -65,6 +65,9 @@ export class ValueCodec{
   };
   const payload=node(this.descriptor.root,value,0);const bytes=join([wireMagic,this.#hash,payload]);if(bytes.length>l.bytes)throw Error('wire byte limit');return bytes;
  }
+ encodeWith(emit,options={}){
+  const w=new WireEncoder(options);w.bytes(wireMagic);w.bytes(this.#hash);emit(w);const bytes=w.finish();this.validate(bytes,options);return bytes;
+ }
  scan(bytes,options={},materialize=false,visitor=null){
   const l=wireLimits(options);if(!(bytes instanceof Uint8Array)||typeof SharedArrayBuffer==='function'&&bytes.buffer instanceof SharedArrayBuffer||bytes.length<44||bytes.length>l.bytes)throw Error('wire byte limit or header');
   if(wireMagic.some((b,i)=>bytes[i]!==b)||this.#hash.some((b,i)=>bytes[i+8]!==b))throw Error('wire format or schema mismatch');
@@ -94,3 +97,26 @@ export class ValueCodec{
  decode(bytes,options={}){return this.scan(bytes,options,true);}
 }
 function join(parts){const size=parts.reduce((n,p)=>n+p.length,0);if(size>16777216)throw Error('wire allocation limit');const out=new Uint8Array(size);let at=0;for(const p of parts){out.set(p,at);at+=p.length;}return out;}
+
+// Bounded forward emission avoids building and repeatedly joining child buffers.
+class WireEncoder{
+ #data=new Uint8Array(256);#at=0;#remaining;#depth=0;#limits;
+ constructor(options){this.#limits=wireLimits(options);this.#remaining=this.#limits.nodes;}
+ get position(){return this.#at;}
+ bytes(bytes){
+  const end=this.#at+bytes.length;if(end>this.#limits.bytes)throw Error('wire byte limit');
+  if(end>this.#data.length){const next=new Uint8Array(Math.min(this.#limits.bytes,Math.max(end,this.#data.length*2)));next.set(this.#data.subarray(0,this.#at));this.#data=next;}
+  this.#data.set(bytes,this.#at);this.#at=end;
+ }
+ word(n){if(!Number.isInteger(n)||n<0||n>4294967295)throw Error('wire word range');const b=new Uint8Array(4);new DataView(b.buffer).setUint32(0,n,true);this.bytes(b);}
+ patchWord(at,n){if(!Number.isInteger(at)||at<0||at+4>this.#at||!Number.isInteger(n)||n<0||n>4294967295)throw Error('wire patch offset');new DataView(this.#data.buffer).setUint32(at,n,true);}
+ frame(emit){if(this.#depth>this.#limits.depth||--this.#remaining<0)throw Error('wire node or depth limit');const at=this.position;this.word(0);this.#depth++;try{emit(this);}finally{this.#depth--;}this.patchWord(at,this.position-at-4);}
+ reorder(start,spans){
+  const sorted=spans.slice().sort((a,b)=>a[0]-b[0]);let at=start;
+  for(const [a,b] of sorted){if(!Number.isInteger(a)||!Number.isInteger(b)||a!==at||b<a)throw Error('wire span permutation');at=b;}
+  if(start<0||start>this.#at||at!==this.#at)throw Error('wire span permutation');
+  if(spans.every((s,i)=>s===sorted[i]))return;
+  const copy=this.#data.slice(start,this.#at);at=start;for(const [a,b] of spans){this.#data.set(copy.subarray(a-start,b-start),at);at+=b-a;}
+ }
+ finish(){return this.#data.slice(0,this.#at);}
+}

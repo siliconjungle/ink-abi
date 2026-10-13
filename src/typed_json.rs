@@ -6,7 +6,7 @@ use crate::{
 };
 use serde_json::{json, Value};
 use std::collections::BTreeMap;
-fn integer(token: &str, limit: usize) -> Result<String, String> {
+pub(crate) fn integer(token: &str, limit: usize) -> Result<String, String> {
     if !crate::json_value::number_token(token) {
         return Err("invalid JSON number".into());
     }
@@ -244,9 +244,9 @@ impl TypedJsonCodec {
         self.encode(value, limits)?.stringify(limits)
     }
     pub fn parse_binary(&self, text: &str, limits: Limits) -> Result<Vec<u8>, String> {
-        self.schema.encode(&self.parse(text, limits)?, limits)
+        crate::json_stream::typed_binary(&self.schema, text, limits)
     }
     pub fn stringify_binary(&self, bytes: &[u8], limits: Limits) -> Result<String, String> {
-        self.stringify(&self.schema.decode(bytes, limits)?, limits)
+        crate::json_stream::typed_stringify(&self.schema, bytes, limits)
     }
 }

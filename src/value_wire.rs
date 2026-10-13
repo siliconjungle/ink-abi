@@ -229,6 +229,100 @@ impl Schema {
     pub fn decode(&self, bytes: &[u8], limits: Limits) -> Result<Value, String> {
         self.validate(bytes, limits)?.materialize()
     }
+    /// Emit frames directly from a native value or a streaming input adapter.
+    /// Final validation binds the emitted shape to this exact schema.
+    pub fn encode_with(
+        &self,
+        limits: Limits,
+        emit: impl FnOnce(&mut Encoder) -> Result<(), String>,
+    ) -> Result<Vec<u8>, String> {
+        let mut writer = Encoder::new(limits)?;
+        writer.bytes(MAGIC)?;
+        writer.bytes(&self.identity)?;
+        emit(&mut writer)?;
+        self.validate(&writer.out, limits)?;
+        Ok(writer.out)
+    }
+}
+
+/// Bounded forward frame writer, shared by native and streaming codecs.
+/// It carries resource accounting; only Schema::encode_with authenticates types.
+pub struct Encoder {
+    out: Vec<u8>,
+    limits: Limits,
+    remaining: usize,
+    depth: usize,
+}
+impl Encoder {
+    fn new(limits: Limits) -> Result<Self, String> {
+        let limits = limits.checked()?;
+        Ok(Self {
+            out: Vec::new(),
+            remaining: limits.nodes,
+            depth: 0,
+            limits,
+        })
+    }
+    pub fn position(&self) -> usize {
+        self.out.len()
+    }
+    pub fn bytes(&mut self, bytes: &[u8]) -> Result<(), String> {
+        if bytes.len() > self.limits.bytes.saturating_sub(self.out.len()) {
+            return Err("wire byte limit".into());
+        }
+        self.out.extend_from_slice(bytes);
+        Ok(())
+    }
+    pub fn word(&mut self, value: u32) -> Result<(), String> {
+        self.bytes(&value.to_le_bytes())
+    }
+    pub fn patch_word(&mut self, at: usize, value: u32) -> Result<(), String> {
+        let end = at.checked_add(4).ok_or("wire offset overflow")?;
+        self.out
+            .get_mut(at..end)
+            .ok_or("wire patch offset")?
+            .copy_from_slice(&value.to_le_bytes());
+        Ok(())
+    }
+    pub fn frame(
+        &mut self,
+        emit: impl FnOnce(&mut Self) -> Result<(), String>,
+    ) -> Result<(), String> {
+        count(&mut self.remaining, self.depth, self.limits)?;
+        let at = self.position();
+        self.word(0)?;
+        self.depth += 1;
+        let result = emit(self);
+        self.depth -= 1;
+        result?;
+        let length = u32::try_from(self.position() - at - 4).map_err(|_| "wire frame overflow")?;
+        self.patch_word(at, length)
+    }
+    /// Reorder a contiguous suffix using a checked permutation of its spans.
+    /// Already ordered fields incur no copy. This supports unordered text records.
+    pub fn reorder(&mut self, start: usize, spans: &[(usize, usize)]) -> Result<(), String> {
+        let mut sorted = spans.to_vec();
+        sorted.sort_unstable();
+        let mut at = start;
+        for &(a, b) in &sorted {
+            if a != at || b < a {
+                return Err("wire span permutation".into());
+            }
+            at = b;
+        }
+        if start > self.out.len() || at != self.out.len() {
+            return Err("wire span permutation".into());
+        }
+        if sorted == spans {
+            return Ok(());
+        }
+        let mut ordered = Vec::with_capacity(self.out.len() - start);
+        for &(a, b) in spans {
+            ordered.extend_from_slice(self.out.get(a..b).ok_or("wire span offset")?);
+        }
+        self.out[start..].copy_from_slice(&ordered);
+        Ok(())
+    }
 }
 fn count(budget: &mut usize, depth: usize, limits: Limits) -> Result<(), String> {
     if *budget == 0 || depth > limits.depth {
@@ -588,6 +682,46 @@ pub struct Validated<'a> {
     limits: Limits,
 }
 impl<'a> Validated<'a> {
+    pub fn descriptor(&self) -> Result<&'a Value, String> {
+        self.schema.resolve(self.ty)
+    }
+    pub fn limits(&self) -> Limits {
+        self.limits
+    }
+    pub fn kind(&self) -> Result<&'a str, String> {
+        self.schema.resolve(self.ty)?["kind"]
+            .as_str()
+            .ok_or("wire kind".into())
+    }
+    pub fn require_kind(&self, kind: &str) -> Result<(), String> {
+        if self.kind()? == kind {
+            Ok(())
+        } else {
+            Err("wire native type mismatch".into())
+        }
+    }
+    pub fn require_name(&self, name: &str) -> Result<(), String> {
+        if self.schema.resolve(self.ty)?["name"] == name {
+            Ok(())
+        } else {
+            Err("wire nominal type mismatch".into())
+        }
+    }
+    /// Scalar bytes or a container body; safe to borrow for the witness lifetime.
+    pub fn body(&self) -> Result<&'a [u8], String> {
+        let (a, b) = frame(self.bytes, 0)?;
+        Ok(&self.bytes[a..b])
+    }
+    pub fn fields(&self) -> Result<Fields<'a>, String> {
+        self.require_kind("record")?;
+        let t = self.schema.resolve(self.ty)?;
+        Ok(Fields {
+            parent: *self,
+            fields: t["fields"].as_array().unwrap().iter(),
+            body: self.body()?,
+            position: 0,
+        })
+    }
     pub fn payload(&self) -> &'a [u8] {
         self.bytes
     }
@@ -747,6 +881,78 @@ impl<'a> Validated<'a> {
             position: 4,
             left: u32_at(body, 0)? as usize,
             limits: self.limits,
+        })
+    }
+}
+
+/// Declaration-order record traversal without repeated name scans.
+pub struct Fields<'a> {
+    parent: Validated<'a>,
+    fields: std::slice::Iter<'a, Value>,
+    body: &'a [u8],
+    position: usize,
+}
+impl<'a> Iterator for Fields<'a> {
+    type Item = Result<Validated<'a>, String>;
+    fn next(&mut self) -> Option<Self::Item> {
+        let f = self.fields.next()?;
+        let at = self.position;
+        Some(frame(self.body, at).map(|(_, end)| {
+            self.position = end;
+            Validated {
+                schema: self.parent.schema,
+                ty: &f["type"],
+                bytes: &self.body[at..end],
+                limits: self.parent.limits,
+            }
+        }))
+    }
+}
+
+/// Optional O(1) sequence access. Construction is a single scan; offsets are u32
+/// because the authenticated wire is bounded to 16 MiB. The witness borrows it.
+pub struct SequenceIndex<'a> {
+    parent: Validated<'a>,
+    offsets: Vec<u32>,
+}
+impl<'a> SequenceIndex<'a> {
+    pub fn len(&self) -> usize {
+        self.offsets.len()
+    }
+    pub fn is_empty(&self) -> bool {
+        self.offsets.is_empty()
+    }
+    pub fn retained_bytes(&self) -> usize {
+        self.offsets.capacity() * std::mem::size_of::<u32>()
+    }
+    pub fn at(&self, index: usize) -> Result<Option<Validated<'a>>, String> {
+        let Some(&at) = self.offsets.get(index) else {
+            return Ok(None);
+        };
+        let t = self.parent.schema.resolve(self.parent.ty)?;
+        let body = self.parent.body()?;
+        let (_, end) = frame(body, at as usize)?;
+        Ok(Some(Validated {
+            schema: self.parent.schema,
+            ty: &t["element"],
+            bytes: &body[at as usize..end],
+            limits: self.parent.limits,
+        }))
+    }
+}
+impl<'a> Validated<'a> {
+    pub fn index(&self) -> Result<SequenceIndex<'a>, String> {
+        let items = self.items()?;
+        let mut offsets = Vec::with_capacity(items.left);
+        let mut at = 4usize;
+        for item in items {
+            let item = item?;
+            offsets.push(u32::try_from(at).map_err(|_| "wire index offset")?);
+            at += item.bytes.len();
+        }
+        Ok(SequenceIndex {
+            parent: *self,
+            offsets,
         })
     }
 }

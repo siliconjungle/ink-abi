@@ -1,6 +1,7 @@
 // JSON text is a boundary adapter to an ordinary recursive Ink datatype.
 // No JavaScript Number conversion occurs for JSON numeric tokens.
 export function jsonNumberToken(s){return typeof s==='string'&&/^-?(0|[1-9][0-9]*)(\.[0-9]+)?([eE][+-]?[0-9]+)?$/.test(s);}
+const jsonWireEncoder=new TextEncoder();
 const jsonLimits={bytes:16777216,nodes:1000000,depth:128};
 function checkedJsonLimits(options){const l={...jsonLimits,...options};for(const k of ['bytes','nodes','depth'])if(!Number.isSafeInteger(l[k])||l[k]<0||l[k]>jsonLimits[k])throw Error('JSON hard resource limit');return l;}
 function jsonVariant(index,item){let payload=index===0?{}:{item0:item};if(index<5)payload={Ok:payload};for(let i=0;i<index;i++)payload={Err:payload};return {payload};}
@@ -51,8 +52,8 @@ export class JsonCodec{
  }
  parse(text,options={}){const v=parseJson(text,options);this.values.encode(v,options);return v;}
  stringify(value,options={}){this.values.encode(value,options);return stringifyJson(value,options);}
- parseBinary(text,options={}){return this.values.encode(parseJson(text,options),options);}
- stringifyBinary(bytes,options={}){return stringifyJson(this.values.decode(bytes,options),options);}
+ parseBinary(text,options={}){return streamJsonBinary(this.values,text,options,false);}
+ stringifyBinary(bytes,options={}){return streamWireJsonText(this.values,bytes,options,true);}
  validateBinary(bytes,options={}){
   const decoder=new TextDecoder('utf-8',{fatal:true});
   this.values.visit(bytes,(type,body)=>{
@@ -113,6 +114,96 @@ export class TypedJsonCodec{
  }
  parse(text,options={}){return this.decode(parseJson(text,options),options);}
  stringify(value,options={}){return stringifyJson(this.encode(value,options),options);}
- parseBinary(text,options={}){return this.values.encode(this.parse(text,options),options);}
- stringifyBinary(bytes,options={}){return this.stringify(this.values.decode(bytes,options),options);}
+ parseBinary(text,options={}){return streamJsonBinary(this.values,text,options,true);}
+ stringifyBinary(bytes,options={}){return streamWireJsonText(this.values,bytes,options,false);}
+}
+
+// Token reader shared by schema-directed and arbitrary-JSON wire emission.
+class JsonWireReader{
+ constructor(text,options){this.l=checkedJsonLimits(options);if(typeof text!=='string'||!text.isWellFormed()||text.length>this.l.bytes||jsonWireEncoder.encode(text).length>this.l.bytes)throw Error('JSON byte or Unicode limit');this.text=text;this.at=0;this.remaining=this.l.nodes;}
+ ws(){while(this.at<this.text.length&&' \t\r\n'.includes(this.text[this.at]))this.at++;}
+ peek(){this.ws();return this.text[this.at];}
+ eat(c){this.ws();if(this.text[this.at]===c){this.at++;return true;}return false;}
+ node(d){if(d>this.l.depth||--this.remaining<0)throw Error('JSON node or depth limit');}
+ string(){this.ws();const start=this.at;if(!this.eat('"'))throw Error('expected JSON string');while(this.at<this.text.length){if(this.text[this.at]==='"'){this.at++;const v=JSON.parse(this.text.slice(start,this.at));if(!v.isWellFormed())throw Error('invalid JSON Unicode');return v;}if(this.text[this.at]==='\\')this.at+=2;else this.at++;}throw Error('unterminated JSON string');}
+ leaf(d){this.node(d);const c=this.peek();for(const [word,v] of [['null',null],['true',true],['false',false]])if(this.text.startsWith(word,this.at)){this.at+=word.length;return v;}if(c==='"')return this.string();if(c==='-'||c>='0'&&c<='9'){const start=this.at;while(this.at<this.text.length&&'-+0123456789.eE'.includes(this.text[this.at]))this.at++;const token=this.text.slice(start,this.at);if(!jsonNumberToken(token))throw Error('invalid JSON number');return token;}throw Error('invalid JSON scalar');}
+ finish(){this.ws();if(this.at!==this.text.length)throw Error('trailing JSON text');}
+}
+function streamJsonBinary(values,text,options,typed){
+ const p=new JsonWireReader(text,options),utf8=jsonWireEncoder;
+ const list=(w,open,close,item)=>{if(!p.eat(open))throw Error('JSON container shape');const at=w.position;w.word(0);let count=0;if(!p.eat(close))while(true){item(w);count++;if(p.eat(close))break;if(!p.eat(','))throw Error('JSON container separator');}w.patchWord(at,count);};
+ const variant=(w,index,level,emit)=>{if(level<index)w.frame(w=>{w.bytes(Uint8Array.of(1));variant(w,index,level+1,emit);});else if(index<5)w.frame(w=>{w.bytes(Uint8Array.of(0));w.frame(emit);});else w.frame(emit);};
+ const json=(w,d)=>{
+  const ch=p.peek(),index=ch==='n'?0:ch==='t'||ch==='f'?1:ch==='-'||ch>='0'&&ch<='9'?2:ch==='"'?3:ch==='['?4:ch==='{'?5:-1;if(index<0)throw Error('invalid JSON value');
+  const leaf=index<4?p.leaf(d):null;if(index>=4)p.node(d);
+  w.frame(w=>variant(w,index,0,w=>{
+   if(index===0)return;if(index===1){w.frame(w=>w.bytes(Uint8Array.of(+leaf)));return;}
+   if(index===2||index===3){w.frame(w=>w.bytes(utf8.encode(leaf)));return;}
+   w.frame(w=>{if(index===4)list(w,'[',']',w=>json(w,d+1));else{const seen=new Set();list(w,'{','}',w=>{const key=p.string();if(seen.has(key))throw Error('duplicate JSON object key');seen.add(key);if(!p.eat(':'))throw Error('JSON object colon');w.frame(w=>{w.frame(w=>w.bytes(utf8.encode(key)));json(w,d+1);});});}});
+  }));
+ };
+ const read=(type,w,d)=>{
+  const t=values.resolve(type);w.frame(w=>{
+   if(t.kind==='list'||t.kind==='vector'){p.node(d);list(w,'[',']',w=>read(t.element,w,d+1));return;}
+   if(t.kind==='record'){
+    p.node(d);if(!p.eat('{'))throw Error('expected JSON record');const start=w.position,spans=new Array(t.fields.length).fill(null);
+    if(!p.eat('}'))while(true){const key=p.string(),i=t.fields.findIndex(f=>f.name===key);if(i<0)throw Error('unknown JSON record field');if(spans[i])throw Error('duplicate JSON record field');if(!p.eat(':'))throw Error('JSON record colon');const at=w.position;read(t.fields[i].type,w,d+1);spans[i]=[at,w.position];if(p.eat('}'))break;if(!p.eat(','))throw Error('JSON record separator');}
+    if(spans.some(s=>s===null))throw Error('missing JSON record field');w.reorder(start,spans);return;
+   }
+   if(t.kind==='option'||t.kind==='result'){
+    p.node(d);if(!p.eat('{'))throw Error('expected JSON tagged value');const key=p.string();if(!p.eat(':'))throw Error('JSON tag colon');
+    if(t.kind==='option'&&key==='None'){if(p.leaf(d+1)!==null)throw Error('JSON None payload');w.bytes(Uint8Array.of(0));}
+    else{const child=t.kind==='option'&&key==='Some'?t.element:t.kind==='result'&&key==='Ok'?t.ok:t.kind==='result'&&key==='Err'?t.error:null;if(!child)throw Error('invalid JSON tag');w.bytes(Uint8Array.of(key==='Ok'?0:1));read(child,w,d+1);}
+    if(!p.eat('}'))throw Error('expected exactly one JSON tag');return;
+   }
+   const ch=p.peek(),v=p.leaf(d),bad=()=>{throw Error('JSON does not match '+t.kind);};
+   if(t.kind==='unit'){if(v!==null)bad();return;}
+   if(t.kind==='bool'){if(typeof v!=='boolean')bad();w.bytes(Uint8Array.of(+v));return;}
+   if(['string','id','enum'].includes(t.kind)){if(ch!=='"')bad();w.bytes(utf8.encode(v));return;}
+   if(ch!=='-'&&!(ch>='0'&&ch<='9'))bad();
+   if(t.kind==='int'){w.bytes(utf8.encode(jsonInteger(v,4096)));return;}
+   const size=t.kind==='u64'?8:4,b=new Uint8Array(size),dv=new DataView(b.buffer);
+   if(t.kind==='f32'){dv.setFloat32(0,Number(v),true);if(!Number.isFinite(dv.getFloat32(0,true)))throw Error('JSON f32 overflow');}
+   else{const n=BigInt(jsonInteger(v,t.kind==='u64'?20:10));if(t.kind==='u64'){if(n<0n||n>18446744073709551615n)bad();dv.setBigUint64(0,n,true);}else if(t.kind==='u32'){if(n<0n||n>4294967295n)bad();dv.setUint32(0,Number(n),true);}else if(t.kind==='i32'){if(n< -2147483648n||n>2147483647n)bad();dv.setInt32(0,Number(n),true);}else bad();}
+   w.bytes(b);
+  });
+ };
+ return values.encodeWith(w=>{if(typed)read(values.descriptor.root,w,0);else json(w,0);p.finish();},options);
+}
+
+// Render validated bytes in a single traversal; only the final text is owned.
+function streamWireJsonText(values,bytes,options,library){
+ values.validate(bytes,options);const l=checkedJsonLimits(options),parts=[];let size=0,remaining=l.nodes;const dv=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength),decoder=new TextDecoder('utf-8',{fatal:true});
+ const emit=s=>{size+=jsonWireEncoder.encode(s).length;if(size>l.bytes)throw Error('JSON byte limit');parts.push(s);};
+ const string=s=>emit(JSON.stringify(s));const node=d=>{if(d>l.depth||--remaining<0)throw Error('JSON node or depth limit');};
+ const frame=(type,at)=>{const t=values.resolve(type),start=at+4,end=start+dv.getUint32(at,true);return{t,start,end};};
+ const json=(type,at,d)=>{
+  node(d);let root=frame(type,at),sum=frame(root.t.fields[0].type,root.start),index=0;
+  while(index<5){const err=bytes[sum.start];sum=frame(err?sum.t.error:sum.t.ok,sum.start+1);if(!err)break;index++;}
+  if(index===0){emit('null');return root.end;}
+  const item=frame(sum.t.fields[0].type,sum.start);
+  if(index===1)emit(bytes[item.start]?'true':'false');
+  else if(index===2){const token=decoder.decode(bytes.subarray(item.start,item.end));if(!jsonNumberToken(token))throw Error('invalid JSON number token');emit(token);}
+  else if(index===3)string(decoder.decode(bytes.subarray(item.start,item.end)));
+  else{const count=dv.getUint32(item.start,true);let p=item.start+4;emit(index===4?'[':'{');const seen=new Set();for(let i=0;i<count;i++){if(i)emit(',');if(index===4)p=json(item.t.element,p,d+1);else{const member=frame(item.t.element,p),key=frame(member.t.fields[0].type,member.start),name=decoder.decode(bytes.subarray(key.start,key.end));if(seen.has(name))throw Error('duplicate JSON object key');seen.add(name);string(name);emit(':');json(member.t.fields[1].type,key.end,d+1);p=member.end;}}emit(index===4?']':'}');}
+  return root.end;
+ };
+ const typed=(type,at,d)=>{
+  node(d);const f=frame(type,at),t=f.t;let p=f.start;
+  switch(t.kind){
+   case 'unit':emit('null');break;
+   case 'bool':emit(bytes[p]?'true':'false');break;
+   case 'u32':emit(String(dv.getUint32(p,true)));break;
+   case 'u64':emit(String(dv.getBigUint64(p,true)));break;
+   case 'i32':emit(String(dv.getInt32(p,true)));break;
+   case 'f32':{const n=dv.getFloat32(p,true);if(!Number.isFinite(n))throw Error('non-finite f32 cannot encode as JSON');emit(Object.is(n,-0)?'-0':String(n));break;}
+   case 'int':emit(decoder.decode(bytes.subarray(p,f.end)));break;
+   case 'string':case 'id':case 'enum':string(decoder.decode(bytes.subarray(p,f.end)));break;
+   case 'list':case 'vector':{const n=dv.getUint32(p,true);p+=4;emit('[');for(let i=0;i<n;i++){if(i)emit(',');p=typed(t.element,p,d+1);}emit(']');break;}
+   case 'record':emit('{');for(let i=0;i<t.fields.length;i++){if(i)emit(',');const field=t.fields[i];string(field.name);emit(':');p=typed(field.type,p,d+1);}emit('}');break;
+   case 'option':case 'result':{const tag=bytes[p++],key=t.kind==='option'?(tag?'Some':'None'):tag?'Err':'Ok';emit('{');string(key);emit(':');if(t.kind==='option'&&!tag){node(d+1);emit('null');}else typed(t.kind==='option'?t.element:tag?t.error:t.ok,p,d+1);emit('}');break;}
+   default:throw Error('unsupported typed JSON descriptor');
+  }return f.end;
+ };
+ if(library)json(values.descriptor.root,40,0);else typed(values.descriptor.root,40,0);return parts.join('');
 }
