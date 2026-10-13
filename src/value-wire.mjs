@@ -213,6 +213,94 @@ class CompactDecodeCursor{
  text(){const n=this.count();this.require(n);const start=this.cursor;this.cursor+=n;return wireDecodeText(this.bytes,start,this.cursor);}
 }
 function wireInvalidValue(){throw Error('invalid value for wire schema');}
+// Capture has the canonical logical meaning of decode(encode(value)), without
+// allocating wire bytes. A separate plan leaves validation/decoder hot shapes
+// unchanged and never retains host input containers between calls.
+function wireCapturePlan(root,checked=true){
+ const seen=new WeakMap();
+ const build=source=>{
+  if(seen.has(source))return seen.get(source);
+  const p={kind:source.kind,type:source.type,capture:null};seen.set(source,p);
+  if(source.fields)p.fields=source.fields.map(f=>({name:f.name,plan:build(f.plan)}));
+  if(source.element)p.element=build(source.element);
+  if(source.ok){p.ok=build(source.ok);p.error=build(source.error);}
+  p.capture=checked?wireCaptureOperation(p):wireCopyOperation(p);return p;
+ };return build(root);
+}
+function wireCaptureOperation(p){
+ const t=p.type;let copy;
+ switch(p.kind){
+  case 'unit':copy=v=>{if(v!==null)wireInvalidValue();return null;};break;
+  case 'bool':copy=(v,r)=>{if(typeof v!=='boolean')wireInvalidValue();r.add(1);return v;};break;
+  case 'u32':case 'i32':{
+   const min=p.kind==='u32'?0:-2147483648,max=p.kind==='u32'?4294967295:2147483647;
+   copy=(v,r)=>{if(typeof v!=='number'||!Number.isInteger(v)||v<min||v>max)wireInvalidValue();r.add(4);return v===0?0:v;};break;
+  }
+  case 'u64':copy=(v,r)=>{const kind=typeof v;if(kind==='number'&&!Number.isSafeInteger(v)||kind!=='bigint'&&kind!=='number'&&kind!=='string'||kind==='string'&&(!wireDecimal(v)||v.startsWith('-')))wireInvalidValue();const n=BigInt(v);if(n<0n||n>18446744073709551615n)wireInvalidValue();r.add(8);return n;};break;
+  case 'f32':copy=(v,r)=>{let bits;if(typeof v==='number'&&Number.isFinite(v)){wireFloat.setFloat32(0,v,true);if(!Number.isFinite(wireFloat.getFloat32(0,true)))wireInvalidValue();bits=wireFloat.getUint32(0,true);}else{if(!wireTagged(v,'F32Bits'))wireInvalidValue();bits=v.F32Bits;if(!Number.isInteger(bits)||bits<0||bits>4294967295)wireInvalidValue();}r.add(4);return {F32Bits:bits===0?0:bits};};break;
+  case 'string':case 'int':case 'id':case 'enum':copy=(v,r)=>{const text=p.kind==='int'?(typeof v==='bigint'?v.toString():wireTagged(v,'Int')?v.Int:null):v;if(typeof text!=='string'||!text.isWellFormed()||text.length>r.limit)wireInvalidValue();if(p.kind==='int'&&!wireDecimal(text)||p.kind==='id'&&!/^[0-9a-f]{32}$/.test(text)||p.kind==='enum'&&!t.variants.includes(text))wireInvalidValue();r.add(wireUtf8Length(text));return p.kind==='int'?{Int:text}:text;};break;
+  case 'list':case 'vector':{
+   const element=p.element,size=p.kind==='vector'?t.size:null;
+   copy=(v,r,d)=>{if(!Array.isArray(v)&&!(ArrayBuffer.isView(v)&&!(v instanceof DataView)))wireInvalidValue();const n=v.length;if(n>r.remaining||size!==null&&n!==size)wireInvalidValue();r.add(4);const out=new Array(n);for(let i=0;i<n;i++)out[i]=element.capture(v[i],r,d+1);return out;};break;
+  }
+  case 'record':{
+   const fs=p.fields;let fields;
+   switch(fs.length){
+    case 0:fields=()=>({});break;
+    case 1:fields=(v,r,d)=>({[fs[0].name]:fs[0].plan.capture(v[fs[0].name],r,d+1)});break;
+    case 2:fields=(v,r,d)=>({[fs[0].name]:fs[0].plan.capture(v[fs[0].name],r,d+1),[fs[1].name]:fs[1].plan.capture(v[fs[1].name],r,d+1)});break;
+    case 3:fields=(v,r,d)=>({[fs[0].name]:fs[0].plan.capture(v[fs[0].name],r,d+1),[fs[1].name]:fs[1].plan.capture(v[fs[1].name],r,d+1),[fs[2].name]:fs[2].plan.capture(v[fs[2].name],r,d+1)});break;
+    case 4:fields=(v,r,d)=>({[fs[0].name]:fs[0].plan.capture(v[fs[0].name],r,d+1),[fs[1].name]:fs[1].plan.capture(v[fs[1].name],r,d+1),[fs[2].name]:fs[2].plan.capture(v[fs[2].name],r,d+1),[fs[3].name]:fs[3].plan.capture(v[fs[3].name],r,d+1)});break;
+    default:fields=(v,r,d)=>{const out={};for(const f of fs){const value=f.plan.capture(v[f.name],r,d+1);Object.defineProperty(out,f.name,{value,enumerable:true,writable:true,configurable:true});}return out;};
+   }
+   copy=(v,r,d)=>{if(!v||typeof v!=='object'||Array.isArray(v)||Object.keys(v).length!==fs.length)wireInvalidValue();for(const f of fs)if(!wireOwn(v,f.name))wireInvalidValue();return fields(v,r,d);};break;
+  }
+  case 'option':copy=(v,r,d)=>{r.add(1);if(wireTagged(v,'None')&&v.None===null)return {None:null};if(wireTagged(v,'Some'))return {Some:p.element.capture(v.Some,r,d+1)};wireInvalidValue();};break;
+  case 'result':copy=(v,r,d)=>{r.add(1);if(wireTagged(v,'Ok'))return {Ok:p.ok.capture(v.Ok,r,d+1)};if(wireTagged(v,'Err'))return {Err:p.error.capture(v.Err,r,d+1)};wireInvalidValue();};break;
+  default:copy=()=>{throw Error('unsupported wire kind');};
+ }
+ return (v,r,d)=>{if(d>r.depth||--r.remaining<0)throw Error('wire node or depth limit');r.add(4);return copy(v,r,d);};
+}
+class WireCaptureCursor{
+ constructor(limits){this.remaining=limits.nodes;this.depth=limits.depth;this.limit=limits.bytes;this.bytes=40;this.add(0);}
+ add(n){this.bytes+=n;if(this.bytes>this.limit)throw Error('wire byte limit');}
+ enter(depth,bytes){if(depth>this.depth||--this.remaining<0)throw Error('wire node or depth limit');this.add(bytes);}
+ text(value){if(value.length>this.limit)throw Error('wire byte limit');this.add(wireUtf8Length(value));}
+}
+// Literal lowerers share this fixed resource policy with logical capture.
+export function createValueCaptureBudget(options={}){return new WireCaptureCursor(wireLimits(options));}
+// The trusted-value API has the same canonical copy and ownership semantics.
+// Its caller supplies a stable value accepted by validateValue. Shape/range
+// checks remain at external capture boundaries; resource limits still apply.
+function wireCopyOperation(p){
+ let copy;
+ switch(p.kind){
+  case 'unit':copy=()=>null;break;
+  case 'bool':copy=(v,r)=>{r.add(1);return v;};break;
+  case 'u32':copy=(v,r)=>{r.add(4);return v>>>0;};break;
+  case 'i32':copy=(v,r)=>{r.add(4);return v|0;};break;
+  case 'u64':copy=(v,r)=>{r.add(8);return BigInt(v);};break;
+  case 'f32':copy=(v,r)=>{let bits;if(typeof v==='number'){wireFloat.setFloat32(0,v,true);bits=wireFloat.getUint32(0,true);}else bits=v.F32Bits;r.add(4);return {F32Bits:bits===0?0:bits};};break;
+  case 'string':case 'id':case 'enum':copy=(v,r)=>{r.add(wireUtf8Length(v));return v;};break;
+  case 'int':copy=(v,r)=>{const text=typeof v==='bigint'?v.toString():v.Int;r.add(wireUtf8Length(text));return {Int:text};};break;
+  case 'list':case 'vector':copy=(v,r,d)=>{const n=v.length;if(n>r.remaining)throw Error('wire sequence size');r.add(4);const out=new Array(n);for(let i=0;i<n;i++)out[i]=p.element.capture(v[i],r,d+1);return out;};break;
+  case 'record':{
+   const fs=p.fields;
+   switch(fs.length){
+    case 0:copy=()=>({});break;
+    case 1:copy=(v,r,d)=>({[fs[0].name]:fs[0].plan.capture(v[fs[0].name],r,d+1)});break;
+    case 2:copy=(v,r,d)=>({[fs[0].name]:fs[0].plan.capture(v[fs[0].name],r,d+1),[fs[1].name]:fs[1].plan.capture(v[fs[1].name],r,d+1)});break;
+    case 3:copy=(v,r,d)=>({[fs[0].name]:fs[0].plan.capture(v[fs[0].name],r,d+1),[fs[1].name]:fs[1].plan.capture(v[fs[1].name],r,d+1),[fs[2].name]:fs[2].plan.capture(v[fs[2].name],r,d+1)});break;
+    case 4:copy=(v,r,d)=>({[fs[0].name]:fs[0].plan.capture(v[fs[0].name],r,d+1),[fs[1].name]:fs[1].plan.capture(v[fs[1].name],r,d+1),[fs[2].name]:fs[2].plan.capture(v[fs[2].name],r,d+1),[fs[3].name]:fs[3].plan.capture(v[fs[3].name],r,d+1)});break;
+    default:copy=(v,r,d)=>{const out={};for(const f of fs){const value=f.plan.capture(v[f.name],r,d+1);Object.defineProperty(out,f.name,{value,enumerable:true,writable:true,configurable:true});}return out;};
+   }break;
+  }
+  case 'option':copy=(v,r,d)=>{r.add(1);return Object.hasOwn(v,'None')&&v.None===null?{None:null}:{Some:p.element.capture(v.Some,r,d+1)};};break;
+  case 'result':copy=(v,r,d)=>{r.add(1);return Object.hasOwn(v,'Ok')?{Ok:p.ok.capture(v.Ok,r,d+1)}:{Err:p.error.capture(v.Err,r,d+1)};};break;
+  default:copy=()=>{throw Error('unsupported wire kind');};
+ }
+ return (v,r,d)=>{if(d>r.depth||--r.remaining<0)throw Error('wire node or depth limit');r.add(4);return copy(v,r,d);};
+}
 // Emit the cached literal schema with one forward writer. Each value is checked
 // where it is consumed; byte bounds belong to the writer, not a second size walk.
 function wireEncodeValue(root,value,l,w){
@@ -381,6 +469,8 @@ export class ValueCodec{
  #encoder;
  #decodeBound=false;
  #scanPlan=null;
+ #capturePlan=null;
+ #copyPlan=null;
  get descriptor(){return this.#descriptor;}
  constructor(descriptor){
   // This synchronous path is for compiler-generated immutable metadata. For
@@ -393,6 +483,8 @@ export class ValueCodec{
  }
  resolve(t){for(let i=0;i<64;i++){if(t.kind!=='ref')return t;t=this.descriptor.named[t.name];if(!t)throw Error('wire reference');}throw Error('wire reference cycle');}
  validateValue(value,options={}){wireCheckValue(this.#valuePlan,value,wireLimits(options));return true;}
+ capture(value,options={}){const limits=wireLimits(options);this.#capturePlan??=wireCapturePlan(this.#valuePlan);return this.#capturePlan.capture(value,new WireCaptureCursor(limits),0);}
+ copy(value,options={}){const limits=wireLimits(options);this.#copyPlan??=wireCapturePlan(this.#valuePlan,false);return this.#copyPlan.capture(value,new WireCaptureCursor(limits),0);}
  compact(){return this.#compactCodec??=new CompactValueCodec(this);}
  encode(value,options={}){
   const l=wireLimits(options),w=this.#encoder&&!this.#encoder.active?this.#encoder:new WireEncoder(l);

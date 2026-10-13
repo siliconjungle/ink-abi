@@ -57,6 +57,14 @@ non-finite f32 is binary-only. JavaScript sources expose equivalent codecs, a
 bounded byte visitor and `JsonCodec.validateBinary` without a document tree.
 JavaScript `ValueCodec.validateValue(value, limits)` checks logical values and
 their encoded byte/node/depth budgets without allocating an encoded buffer.
+`ValueCodec.capture(value, limits)` additionally constructs an owned canonical
+logical tree in that same traversal, equivalent to `decode(encode(value))` for
+stable inputs. It never retains caller containers. `ValueCodec.copy(value, limits)`
+copies stable, already well-typed values under the caller-trusted contract; it
+retains resource accounting but does not validate shapes/ranges. External values
+must use `capture` or a checked wire boundary. Aliases in the input may become
+separate owned nodes, as in a wire round trip. These are operational mechanisms,
+not mathematical rewrite certificates.
 Immutable schema edges are resolved once, and single-child validation uses an
 iterative traversal. `encode` writes framed values forward into one growing buffer. JSON text
 conversion uses logical validation or direct binary emission as appropriate;

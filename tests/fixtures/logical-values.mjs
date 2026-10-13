@@ -22,6 +22,8 @@ const samples=[null,true,false,0,-0,1,-1,4294967295,4294967296,-2147483648,-2147
 const inherited=Object.assign(Object.create({extra:1}),{Ok:1});samples.push(inherited);
 const hidden={Ok:1};Object.defineProperty(hidden,'extra',{value:1});samples.push(hidden);
 const outcome=(run,value,limits)=>{try{run(value,limits);return true;}catch{return false;}};
+const objects=value=>{const out=new Set(),visit=v=>{if(v&&typeof v==='object'&&!out.has(v)){out.add(v);for(const child of Object.values(v))visit(child);}};visit(value);return out;};
+const assertDetached=(input,output)=>{const old=objects(input);for(const object of objects(output))assert.equal(old.has(object),false,'captured container aliases input');};
 // Independent framing oracle: recurse over descriptors through the public
 // forward writer, rather than the compiled encode plan. Inputs are decoded
 // canonical carriers, so the oracle only specifies bytes, not validation.
@@ -49,9 +51,12 @@ for(const type of types){
  const codec=await createValueCodec(type,type===node?{Node:node}:{});
  for(const value of samples){
   assert.equal(outcome((v,l)=>codec.validateValue(v,l),value,{}),outcome((v,l)=>codec.encode(v,l),value,{}));
+  assert.equal(outcome(v=>codec.capture(v),value),outcome(v=>codec.encode(v),value));
   assert.equal(outcome(v=>codec.compact().encode(v),value),outcome(v=>codec.encode(v),value));
   if(!outcome(v=>codec.encode(v),value,{}))continue;
   const bytes=codec.encode(value);
+  const captured=codec.capture(value);assert.deepEqual(captured,codec.decode(bytes));assertDetached(value,captured);assert.deepEqual(codec.encode(captured),bytes);
+  const copied=codec.copy(value);assert.deepEqual(copied,captured);assertDetached(value,copied);
   assert.equal(codec.validate(bytes),true);assert.deepEqual(codec.encode(codec.decode(bytes)),bytes);
   assert.deepEqual(codec.decode(bytes),codec.scan(bytes,{},true,()=>{}));
   const trace=(generic,names=null)=>{const events=[];const visit=function(t,data,start,end,d){assert.equal(this,undefined);events.push([t.name,start,end,d,Array.from(data.subarray(start,end))]);};if(generic)codec.scan(bytes,{},true,visit,names,true);else codec.visitSpans(bytes,visit,{},names);return events;};
@@ -85,6 +90,8 @@ for(const type of types){
   for(const limits of [{bytes:bytes.length},{bytes:bytes.length-1},{nodes:0},{nodes:1},{nodes:2},{nodes:4},{depth:0},{depth:1},{depth:3},{depth:6}])
   {
    assert.equal(outcome((v,l)=>codec.validateValue(v,l),value,limits),outcome((v,l)=>codec.encode(v,l),value,limits),JSON.stringify(limits));
+   assert.equal(outcome(v=>codec.capture(v,limits),value),outcome(v=>codec.encode(v,limits),value));
+   assert.equal(outcome(v=>codec.copy(v,limits),value),outcome(v=>codec.encode(v,limits),value));
    assert.equal(outcome(()=>codec.decode(bytes,limits)),outcome(()=>codec.scan(bytes,limits,true,()=>{})));
    assert.equal(outcome(()=>codec.validate(bytes,limits)),outcome(()=>codec.scan(bytes,limits,true,()=>{})));
   }
@@ -93,12 +100,27 @@ for(const type of types){
 // A recursive cycle must reject through the node/depth limits, never loop forever.
 const codec=await createValueCodec(node,{Node:node}),cycle={text:'loop'};cycle.next={Some:cycle};
 assert.throws(()=>codec.validateValue(cycle));
+assert.throws(()=>codec.capture(cycle));
+assert.throws(()=>codec.copy(cycle));
 assert.throws(()=>codec.validateValue({text:'a',next:{None:null}},{depth:129}));
 console.log('logical value validation agrees with independent forward encoding');
 
 // Capture a raw scalar field once, including ordinary getter-backed inputs.
 const float=await createValueCodec(scalar('f32'));let reads=0;const getter={get F32Bits(){return reads++===0?0:4294967296;}};assert.equal(float.validateValue(getter),true);assert.equal(reads,1);
 reads=0;assert.deepEqual(float.encode(getter),float.encode({F32Bits:0}));assert.equal(reads,1);
+reads=0;assert.deepEqual(float.capture(getter),{F32Bits:0});assert.equal(reads,1);
+const reentrantBits={get F32Bits(){assert.deepEqual(float.capture(0.1),float.decode(float.encode(0.1)));return 0x7f812345;}};
+assert.deepEqual(float.capture(reentrantBits),{F32Bits:0x7f812345});
+assert.deepEqual(float.copy(reentrantBits),{F32Bits:0x7f812345});
+assert.throws(()=>float.capture({F32Bits:4294967296}));assert.deepEqual(float.capture({F32Bits:0x80000000}),{F32Bits:0x80000000});
+for(const count of [0,1,2,3,4,5,8]){
+ const fields=Array.from({length:count},(_,i)=>({name:i===0?'__proto__':'f'+i,type:{kind:'list',element:scalar('string')}})),record=await createValueCodec({kind:'record',name:'Owned'+count,fields});
+ const input=Object.fromEntries(fields.map(f=>[f.name,['雪','\ufeff','😀']])),captured=record.capture(input);
+ assert.deepEqual(captured,record.decode(record.encode(input)));assertDetached(input,captured);assert.equal(Object.getPrototypeOf(captured),Object.prototype);
+ for(const f of fields){assert.equal(Object.hasOwn(captured,f.name),true);captured[f.name][0]='changed';assert.equal(input[f.name][0],'雪');}
+}
+Object.defineProperty(Object.prototype,'F32Bits',{set(){throw Error('prototype setter called');},configurable:true});
+try{assert.deepEqual(float.capture(0),{F32Bits:0});}finally{delete Object.prototype.F32Bits;}
 
 // JSON construction/rendering may fuse schema checking only when the complete
 // recursive schema agrees. Compare acceptance with the separate general checker.
