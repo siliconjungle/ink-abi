@@ -55,6 +55,11 @@ shape; `TypedJsonCodec` in `typed_json` supplies fallible conversions for arbitr
 supported descriptors. Public JSON uses exact decimal conversion for Int/words;
 non-finite f32 is binary-only. JavaScript sources expose equivalent codecs, a
 bounded byte visitor and `JsonCodec.validateBinary` without a document tree.
+JavaScript `ValueCodec.validateValue(value, limits)` checks logical values and
+their encoded byte/node/depth budgets without allocating an encoded buffer.
+`encode` writes framed values forward into one growing buffer. JSON text
+conversion uses logical validation or direct binary emission as appropriate;
+neither path constructs and discards a second encoded document.
 Untrusted descriptors use async `createValueCodec`; the synchronous constructor
 consumes trusted compiler metadata. Keep transport, codec checking and mathematical
 rewrite authority separate. See the distribution's `docs/json-and-portable-values.md`
