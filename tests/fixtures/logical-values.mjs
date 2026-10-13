@@ -207,6 +207,7 @@ for(const text of texts){
  assert.deepEqual(json.parse(text),value);assert.equal(json.stringify(value),stringifyJson(value));
  for(const l of limits){
   const expectedParse=outcome(t=>{const v=parseJson(t,l);values.validateValue(v,l);},text,l);
+  assert.equal(outcome(()=>json.parseCompact(text,l)),outcome(()=>values.compact().encode(parseJson(text,l),l)),`${text}: compact ${JSON.stringify(l)}`);
   assert.equal(outcome(t=>json.parse(t,l),text,l),expectedParse,`${text}: parse ${JSON.stringify(l)}`);
   const expectedRender=outcome(v=>{values.validateValue(v,l);stringifyJson(v,l);},value,l);
   assert.equal(outcome(v=>json.stringify(v,l),value,l),expectedRender,`${text}: render ${JSON.stringify(l)}`);
@@ -222,10 +223,10 @@ for(const string of strings){
  assert.equal(value.payload.Err.Err.Err.Ok.item0,string);
  assert.deepEqual(json.parse(text),value);
  assert.equal(json.stringify(value),text);
- assert.deepEqual(json.parseBinary(text),values.encode(value));
+ assert.deepEqual(json.parseBinary(text),values.encode(value));assert.deepEqual(json.parseCompact(text),values.compact().encode(value));
  assert.equal(json.stringifyBinary(values.encode(value)),text);
  assert.equal(stringCodec.parse(text),string);
- assert.deepEqual(stringCodec.parseBinary(text),stringCodec.values.encode(string));
+ assert.deepEqual(stringCodec.parseBinary(text),stringCodec.values.encode(string));assert.deepEqual(stringCodec.parseCompact(text),stringCodec.values.compact().encode(string));
  assert.equal(stringCodec.stringifyBinary(stringCodec.values.encode(string)),text);
 }
 // Consume long, fragmented output as bytes as well as text. Preserve exact
@@ -242,14 +243,14 @@ for(let code=0;code<32;code++)for(const text of ['"'+String.fromCharCode(code)+'
  assert.throws(()=>parseJson(text),SyntaxError);assert.throws(()=>json.parse(text),SyntaxError);assert.throws(()=>json.parseBinary(text),SyntaxError);
 }
 for(const text of ['"\\uD83D\\uDE00"','"a\\\"b"','"\\u0061"','"\\\\"','"\\/"','"\\b\\f\\n\\r\\t"']){
- const value=parseJson(text);assert.equal(value.payload.Err.Err.Err.Ok.item0,JSON.parse(text));assert.deepEqual(json.parseBinary(text),values.encode(value));
+ const value=parseJson(text);assert.equal(value.payload.Err.Err.Err.Ok.item0,JSON.parse(text));assert.deepEqual(json.parseBinary(text),values.encode(value));assert.deepEqual(json.parseCompact(text),values.compact().encode(value));
 }
 for(const text of ['"\\x00"','"\\u000"','"\\uZZZZ"','"\\udfff"','"\\ud800x"','"\\ud800\\ud800"','"unterminated','0\u00a0','\u00a0null']){
- assert.throws(()=>parseJson(text));assert.throws(()=>json.parse(text));assert.throws(()=>json.parseBinary(text));
+ assert.throws(()=>parseJson(text));assert.throws(()=>json.parse(text));assert.throws(()=>json.parseBinary(text));assert.throws(()=>json.parseCompact(text));
 }
 for(const token of ['-0','1e10000','123456789012345678901234567890','-1.2500E+0003']){
  const text=' \t\r\n{"token":'+token+'}\r\n',value=parseJson(text);
- assert.equal(json.stringify(value),'{"token":'+token+'}');assert.deepEqual(json.parseBinary(text),values.encode(value));
+ assert.equal(json.stringify(value),'{"token":'+token+'}');assert.deepEqual(json.parseBinary(text),values.encode(value));assert.deepEqual(json.parseCompact(text),values.compact().encode(value));
 }
 const mismatched=await createValueCodec(jsonType,{Json:{kind:'record',name:'Json',fields:[{name:'wrong',type:scalar('string')}]}});
 assert.throws(()=>new JsonCodec(mismatched));
@@ -323,3 +324,52 @@ for(let i=0;i<40;i++){const corrupt=headerBytes.slice();corrupt[i]^=1;assert.thr
 const largeType={kind:'record',name:'Large',fields:['a','b','c','d','__proto__'].map(name=>({name,type:node}))};
 const large=await createValueCodec(largeType,{Node:node}),largeValue=Object.fromEntries(largeType.fields.map(f=>[f.name,{text:f.name,next:{Some:{text:'child',next:{None:null}}}}]));
 for(const codec of [large,large.compact()])assert.deepEqual(codec.decode(codec.encode(largeValue)),largeValue);
+
+// Forward counted sequences preserve both protocols, including variable-width
+// compact prefixes. Unit payloads isolate the exact final byte requirement.
+const units=await createValueCodec({kind:'list',element:scalar('unit')});
+for(const n of [0,1,127,128,16383,16384])for(const codec of [units,units.compact()]){
+ const input=new Array(n).fill(null),expected=codec.encode(input),emit=w=>w.frame(w=>{const at=w.beginCount();for(let i=0;i<n;i++)w.frame(()=>{});w.endCount(at,n);});
+ assert.deepEqual(codec.encodeWith(emit),expected);
+ assert.deepEqual(codec.encodeWith(emit,{bytes:expected.length}),expected);
+ assert.throws(()=>codec.encodeWith(emit,{bytes:expected.length-1}));
+ assert.throws(()=>codec.encodeWith(emit,{nodes:n}));
+ if(n)assert.throws(()=>codec.encodeWith(emit,{depth:0}));
+}
+for(const codec of [units,units.compact()]){
+ assert.throws(()=>codec.encodeWith(w=>w.frame(w=>{const at=w.beginCount();w.endCount(at,-1);})));
+ assert.throws(()=>codec.encodeWith(w=>w.frame(w=>{const at=w.beginCount();w.endCount(at,4294967296);})));
+}
+
+const bools=(await createValueCodec({kind:'list',element:scalar('bool')})).compact();
+assert.throws(()=>bools.encodeWith(w=>w.frame(w=>{const at=w.beginCount();w.endCount(at,1);})));
+assert.throws(()=>bools.encodeWith(w=>w.frame(w=>{const at=w.beginCount();w.frame(w=>w.byte(2));w.endCount(at,1);})));
+assert.throws(()=>bools.encodeWith(w=>{bools.encode([true]);throw Error('callback failure');}));
+assert.deepEqual(bools.encodeWith(w=>{assert.deepEqual(bools.decode(bools.encode([false])),[false]);w.frame(w=>{const at=w.beginCount();w.frame(w=>w.byte(1));w.endCount(at,1);});}),bools.encode([true]));
+assert.throws(()=>bools.encodeWith(w=>w.replace(-1,0,new Uint8Array())));
+assert.throws(()=>bools.encodeWith(w=>w.replace(0,2,new Uint8Array())));
+// Generic post-emission validation still counts zero-width values.
+assert.throws(()=>units.compact().encodeWith(w=>w.frame(w=>w.count(128)),{nodes:128}));
+for(const n of [0,1,127,128,16383,16384]){
+ const text='['+new Array(n).fill('null').join(',')+']',value=parseJson(text);
+ assert.deepEqual(json.parseCompact(text),values.compact().encode(value));
+}
+const streamRecord=new TypedJsonCodec(await createValueCodec({kind:'record',name:'StreamRecord',fields:[
+ {name:'__proto__',type:scalar('string')},{name:'items',type:{kind:'list',element:{kind:'list',element:scalar('bool')}}},
+ {name:'wide',type:scalar('u64')},{name:'bits',type:scalar('f32')},{name:'next',type:{kind:'option',element:scalar('int')}}]}));
+const recordText='{"next":{"Some":-1.20e2},"bits":-0,"wide":18446744073709551615,"items":['+'['+'true,'.repeat(127)+'false],[],[true]],"__proto__":"雪😀"}';
+const recordValue=streamRecord.parse(recordText);
+assert.deepEqual(streamRecord.parseCompact(recordText),streamRecord.values.compact().encode(recordValue));
+assert.deepEqual(streamRecord.parseBinary(recordText),streamRecord.values.encode(recordValue));
+for(const options of [{nodes:2},{depth:1},{bytes:100}]){
+ assert.throws(()=>streamRecord.parseCompact(recordText,options));
+}
+for(const kind of ['u32','u64','i32','int','f32','bool','unit','string','enum','id','vector','option','result']){
+ const type=kind==='enum'?{kind,name:'Choice',variants:['Yes']}:kind==='id'?{kind,name:'Key'}:kind==='vector'?{kind,size:2,element:scalar('u32')}:kind==='option'?{kind,element:scalar('bool')}:kind==='result'?{kind,ok:scalar('bool'),error:scalar('string')}:{kind};
+ const codec=new TypedJsonCodec(await createValueCodec(type));
+ for(const text of ['0','-0','1.25','1e10000','4294967296','18446744073709551615','true','null','"Yes"','"0123456789abcdef0123456789abcdef"','[1,2]','[1]','{"Some":true}','{"None":null}','{"Ok":false}','{"Err":"雪"}']){
+  const valid=outcome(()=>codec.parse(text));assert.equal(outcome(()=>codec.parseCompact(text)),valid,kind+' '+text);
+  if(valid)assert.deepEqual(codec.parseCompact(text),codec.values.compact().encode(codec.parse(text)));
+ }
+}
+console.log('direct compact JSON emission preserves schema bytes, resources and counted prefixes');

@@ -539,6 +539,8 @@ class WireEncoder{
  beginNode(){const at=this.#at;this.word(0);return at;}
  endNode(at){this.patchWord(at,this.#at-at-4);}
  count(n){this.word(n);}
+ beginCount(){const at=this.position;this.count(0);return at;}
+ endCount(at,n){this.patchWord(at,n);}
  #reserve(size){
   const end=this.#at+size;if(end>this.#byteLimit)throw Error('wire byte limit');
   if(end>this.#data.length){const next=new Uint8Array(Math.min(this.#byteLimit,Math.max(end,this.#data.length*2)));next.set(this.#data.subarray(0,this.#at));this.#data=next;this.#view=new DataView(next.buffer);}
@@ -558,7 +560,13 @@ class WireEncoder{
   const end=this.#reserve(size),r=wireEncoder.encodeInto(text,this.#data.subarray(this.#at,end));if(r.read!==text.length||r.written!==size)throw Error('wire UTF-8 size');this.#at=end;
  }
  patchWord(at,n){if(!Number.isInteger(at)||at<0||at+4>this.#at||!Number.isInteger(n)||n<0||n>4294967295)throw Error('wire patch offset');this.#view.setUint32(at,n,true);}
- frame(emit){if(this.#depth>this.#depthLimit||--this.#remaining<0)throw Error('wire node or depth limit');const at=this.position;this.word(0);this.#depth++;try{emit(this);}finally{this.#depth--;}this.patchWord(at,this.position-at-4);}
+ patchByte(at,n){if(!Number.isInteger(at)||at<0||at>=this.#at||!Number.isInteger(n)||n<0||n>255)throw Error('wire patch offset');this.#data[at]=n;}
+ replace(at,removed,bytes){
+  if(!Number.isInteger(at)||!Number.isInteger(removed)||at<0||removed<0||at+removed>this.#at||!(bytes instanceof Uint8Array))throw Error('wire replacement range');
+  const extra=bytes.length-removed,end=extra>0?this.#reserve(extra):this.#at+extra;
+  this.#data.copyWithin(at+bytes.length,at+removed,this.#at);this.#data.set(bytes,at);this.#at=end;
+ }
+ frame(emit){if(this.#depth>this.#depthLimit||--this.#remaining<0)throw Error('wire node or depth limit');const at=this.beginNode();this.#depth++;try{emit(this);}finally{this.#depth--;}this.endNode(at);}
  reorder(start,spans){
   const sorted=spans.slice().sort((a,b)=>a[0]-b[0]);let at=start;
   for(const [a,b] of sorted){if(!Number.isInteger(a)||!Number.isInteger(b)||a!==at||b<a)throw Error('wire span permutation');at=b;}
@@ -572,6 +580,11 @@ class WireEncoder{
 class CompactWireEncoder extends WireEncoder{
  beginNode(){return 0;}
  endNode(){}
+ endCount(at,n){
+  if(!Number.isInteger(n)||n<0||n>4294967295)throw Error('compact count range');
+  if(n<128){this.patchByte(at,n);return;}
+  const bytes=[];while(n>=128){bytes.push(n%128+128);n=Math.floor(n/128);}bytes.push(n);this.replace(at,1,Uint8Array.from(bytes));
+ }
  count(n){
   if(!Number.isInteger(n)||n<0||n>4294967295)throw Error('compact count range');
   while(n>=128){this.byte(n%128+128);n=Math.floor(n/128);}this.byte(n);
@@ -644,6 +657,9 @@ export class CompactValueCodec{
   this.#encoder??=w;w.reset(l);
   try{w.byte(1);wireEncodeValue(this.#plan,value,l,w);return w.finish();}
   finally{w.active=false;if(w.capacity>4096&&this.#encoder===w)this.#encoder=undefined;}
+ }
+ encodeWith(emit,options=wireDefaultOptions){
+  const w=new CompactWireEncoder(options);w.byte(1);emit(w);const bytes=w.finish();this.validate(bytes,options);return bytes;
  }
  #scan(bytes,options,materialize){
   const l=wireLimits(options);

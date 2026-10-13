@@ -148,3 +148,18 @@ Encoding-only and validation-only users do not construct decoder operations.
 The compact validator remains independent of the descriptor-bound decoder and
 checks canonical counts even for zero-width Unit collections. Recursive records,
 large records, prototype-named fields and owned bit/value carriers are covered.
+
+JavaScript `JsonCodec.parseCompact(text, limits)` and
+`TypedJsonCodec.parseCompact(text, limits)` emit agreed-schema transport directly
+from JSON tokens without constructing a logical value tree. Record fields emit in
+declaration order, arbitrary JSON retains member order and exact number tokens,
+and the complete generic compact validator checks the finished bytes. This is
+JavaScript transport support, independent of portable checkpoints.
+
+Both forward writers expose `beginCount()` / `endCount(offset, count)`. The compact
+writer reserves one prefix byte and grows it to the canonical count only after
+the sequence is complete; limits apply to final byte size, with no five-byte
+temporary prefix requirement. Every `frame` charges a node and depth, and
+`encodeWith` additionally validates complete schema conformance. Callback failure
+or reentry cannot reuse a partially active writer. Prefix insertion and record
+permutation are trusted bounded byte operations, not algebraic rewrite authority.

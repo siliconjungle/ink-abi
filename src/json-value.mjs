@@ -80,6 +80,7 @@ export class JsonCodec{
  parse(text,options={}){return parseJsonValue(text,options,jsonBoundaryBudget(options));}
  stringify(value,options={}){return stringifyJsonValue(value,options,jsonBoundaryBudget(options));}
  parseBinary(text,options={}){return streamJsonBinary(this.values,text,options,false);}
+ parseCompact(text,options={}){return streamJsonBinary(this.values,text,options,false,true);}
  stringifyBinary(bytes,options={}){return streamWireJsonText(this.values,bytes,options,true);}
  validateBinary(bytes,options={}){
   const decoder=new TextDecoder('utf-8',{fatal:true,ignoreBOM:true});let view;
@@ -142,6 +143,7 @@ export class TypedJsonCodec{
  parse(text,options={}){return this.decode(parseJson(text,options),options);}
  stringify(value,options={}){return stringifyJson(this.encode(value,options),options);}
  parseBinary(text,options={}){return streamJsonBinary(this.values,text,options,true);}
+ parseCompact(text,options={}){return streamJsonBinary(this.values,text,options,true,true);}
  stringifyBinary(bytes,options={}){return streamWireJsonText(this.values,bytes,options,false);}
 }
 
@@ -163,9 +165,9 @@ class JsonWireReader{
  leaf(d){this.node(d);const c=this.peek();if(c==='n'&&this.text.startsWith('null',this.at)){this.at+=4;return null;}if(c==='t'&&this.text.startsWith('true',this.at)){this.at+=4;return true;}if(c==='f'&&this.text.startsWith('false',this.at)){this.at+=5;return false;}if(c==='"')return this.string();if(c==='-'||c>='0'&&c<='9')return this.number();throw Error('invalid JSON scalar');}
  finish(){this.ws();if(this.at!==this.text.length)throw Error('trailing JSON text');}
 }
-function streamJsonBinary(values,text,options,typed){
+function streamJsonBinary(values,text,options,typed,compact=false){
  const p=new JsonWireReader(text,options),utf8=jsonWireEncoder;
- const list=(w,open,close,item)=>{if(!p.eat(open))throw Error('JSON container shape');const at=w.position;w.word(0);let count=0;if(!p.eat(close))while(true){item(w);count++;if(p.eat(close))break;if(!p.eat(','))throw Error('JSON container separator');}w.patchWord(at,count);};
+ const list=(w,open,close,item)=>{if(!p.eat(open))throw Error('JSON container shape');const at=w.beginCount();let count=0;if(!p.eat(close))while(true){item(w);count++;if(p.eat(close))break;if(!p.eat(','))throw Error('JSON container separator');}w.endCount(at,count);};
  const variant=(w,index,level,emit)=>{if(level<index)w.frame(w=>{w.byte(1);variant(w,index,level+1,emit);});else if(index<5)w.frame(w=>{w.byte(0);w.frame(emit);});else w.frame(emit);};
  const json=(w,d)=>{
   const ch=p.peek(),index=ch==='n'?0:ch==='t'||ch==='f'?1:ch==='-'||ch>='0'&&ch<='9'?2:ch==='"'?3:ch==='['?4:ch==='{'?5:-1;if(index<0)throw Error('invalid JSON value');
@@ -202,7 +204,7 @@ function streamJsonBinary(values,text,options,typed){
    w.bytes(b);
   });
  };
- return values.encodeWith(w=>{if(typed)read(values.descriptor.root,w,0);else json(w,0);p.finish();},options);
+ return (compact?values.compact():values).encodeWith(w=>{if(typed)read(values.descriptor.root,w,0);else json(w,0);p.finish();},options);
 }
 
 // Render validated bytes in a single traversal; only the final text is owned.
