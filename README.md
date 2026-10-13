@@ -145,6 +145,22 @@ const result = callOwned('mark_received', [document]);
 if (Object.hasOwn(result, 'Ok')) console.log(documents.toJS(result.Ok));
 ```
 
+### Direct construction into a compiled JavaScript value
+
+`JsonCodec.parseCompiled(compiledCodec, text, limits)` targets the generated
+codec's generic typed builder and returns its opaque handle. The schema identity
+must match the JSON codec. Parsing retains the normal grammar, duplicate-key,
+Unicode, exact numeric-token, member-order and resource checks. No complete
+logical `Json` tree or binary buffer is required between parsing and construction.
+The generated builder alone owns private nodes and the selected representation.
+A handle can be passed to `callCompiled`, encoded or materialised through its
+own module's compiled codecs; it is not a transferable JavaScript object.
+
+This explicit JavaScript adapter adds no source primitive or implicit conversion
+in existing calls. It makes no unconditional performance promise. Format validity
+also remains distinct from source typing: constructing a String leaf does not
+prove it is a valid JSON number token. Rendering retains its format checks.
+
 ### Agreed-schema JavaScript transport
 
 `valueCodec.compact()` returns a cached `CompactValueCodec` with the exact same

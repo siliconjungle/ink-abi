@@ -177,6 +177,27 @@ function jsonToJS(value,options){
  };
  return visit(value,0,0);
 }
+const jsonConstructionPaths=Object.freeze(Array.from({length:6},(_,index)=>Object.freeze([0,...Array(index).fill(1),...(index<5?[0]:[]),0])));
+function parseJsonConstructed(text,options,builder){
+ const p=new JsonWireReader(text,options);
+ const paths=jsonConstructionPaths;
+ const fused=typeof builder.openPath==='function';
+ const begin=index=>{if(fused){builder.openPath(paths[index]);return;}for(const choice of paths[index])builder.open(choice);};
+ const end=index=>{for(let i=0;i<(fused?1:index<5?index+3:7);i++)builder.close();};
+ const leaf=(index,item)=>{if(typeof builder.scalarPath==='function'){builder.scalarPath(paths[index],item);return;}begin(index);builder.scalar(item);end(index);};
+ const value=d=>{
+  p.node(d);const c=p.peek();
+  if(c==='n'&&text.startsWith('null',p.at)){p.at+=4;if(typeof builder.emptyPath==='function')builder.emptyPath(paths[0]);else{begin(0);end(0);}return;}
+  if(c==='t'&&text.startsWith('true',p.at)){p.at+=4;leaf(1,true);return;}
+  if(c==='f'&&text.startsWith('false',p.at)){p.at+=5;leaf(1,false);return;}
+  if(c==='"'){leaf(3,p.string());return;}
+  if(c==='['){begin(4);builder.open(0);p.at++;if(!p.eat(']'))while(true){value(d+1);if(p.eat(']'))break;if(!p.eat(','))throw Error('JSON array separator');}builder.close();end(4);return;}
+  if(c==='{'){begin(5);builder.open(0);p.at++;const seen=new Set();if(!p.eat('}'))while(true){const key=p.string();if(seen.has(key))throw Error('duplicate JSON object key');seen.add(key);if(!p.eat(':'))throw Error('JSON object colon');builder.open(0);builder.scalar(key);value(d+1);builder.close();if(p.eat('}'))break;if(!p.eat(','))throw Error('JSON object separator');}builder.close();end(5);return;}
+  if(c==='-'||c>='0'&&c<='9'){const token=p.number();leaf(2,token);return;}
+  throw Error('invalid JSON value');
+ };
+ value(0);p.finish();return builder.finish();
+}
 export class JsonCodec{
  constructor(valueCodec){
   const root=valueCodec.descriptor.root,fields=root.fields;if(root.kind!=='record'||!Array.isArray(fields)||fields.length!==1||fields[0].name!=='payload')throw Error('JSON schema payload');let sum=fields[0].type;
@@ -189,6 +210,10 @@ export class JsonCodec{
   }if(!jsonSameSchema(root,valueCodec.resolve({kind:'ref',name:root.name})))throw Error('JSON recursive schema mismatch');this.values=valueCodec;
  }
  parse(text,options={}){return parseJsonValue(text,options,jsonBoundaryBudget(options));}
+ parseCompiled(codec,text,options={}){
+  if(codec?.identity!==this.values.descriptor.identity||typeof codec.builder!=='function')throw Error('compiled JSON schema mismatch');
+  const builder=codec.builder(options);try{return parseJsonConstructed(text,options,builder);}catch(error){builder.abort();throw error;}
+ }
  stringify(value,options={}){return stringifyJsonValue(value,options,jsonBoundaryBudget(options));}
  fromJS(value,options={}){return jsonFromJS(value,options);}
  toJS(value,options={}){return jsonToJS(value,options);}
