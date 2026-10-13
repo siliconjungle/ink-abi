@@ -54,11 +54,15 @@ for(const type of types){
   const bytes=codec.encode(value);
   assert.equal(codec.validate(bytes),true);assert.deepEqual(codec.encode(codec.decode(bytes)),bytes);
   assert.deepEqual(codec.decode(bytes),codec.scan(bytes,{},true,()=>{}));
+  const trace=(generic,names=null)=>{const events=[];const visit=function(t,data,start,end,d){assert.equal(this,undefined);events.push([t.name,start,end,d,Array.from(data.subarray(start,end))]);};if(generic)codec.scan(bytes,{},true,visit,names,true);else codec.visitSpans(bytes,visit,{},names);return events;};
+  assert.deepEqual(trace(false),trace(true));assert.deepEqual(trace(false,[]),trace(true,[]));
+  assert.deepEqual(trace(false,[codec.descriptor.root.name??'missing']),trace(true,[codec.descriptor.root.name??'missing']));
   // The descriptor-bound decoder and independent generic scanner must agree
   // on malformed frames/tags/text as well as successful values and budgets.
   for(let i=40;i<bytes.length;i++){
    const corrupt=bytes.slice();corrupt[i]^=255;
    assert.equal(outcome(()=>codec.decode(corrupt)),outcome(()=>codec.scan(corrupt,{},true,()=>{})),`mutation at ${i}`);
+   assert.equal(outcome(()=>codec.validate(corrupt)),outcome(()=>codec.scan(corrupt,{},true,()=>{})),`validation mutation at ${i}`);
   }
   assert.deepEqual(referenceBytes(codec,codec.decode(bytes)),bytes);
   const compact=codec.compact(),short=compact.encode(value);
@@ -82,6 +86,7 @@ for(const type of types){
   {
    assert.equal(outcome((v,l)=>codec.validateValue(v,l),value,limits),outcome((v,l)=>codec.encode(v,l),value,limits),JSON.stringify(limits));
    assert.equal(outcome(()=>codec.decode(bytes,limits)),outcome(()=>codec.scan(bytes,limits,true,()=>{})));
+   assert.equal(outcome(()=>codec.validate(bytes,limits)),outcome(()=>codec.scan(bytes,limits,true,()=>{})));
   }
  }
 }
@@ -118,10 +123,42 @@ for(const text of texts){
  }
 }
 for(const text of ['{"a":1,"\\u0061":2}','"\\ud800"','[0,]','01','null trailing'])assert.throws(()=>json.parse(text));
+// The cursor fast path must match escaped-string parsing, preserve exact
+// number lexemes, and enforce identical text/wire limits in both adapters.
+const stringCodec=new TypedJsonCodec(await createValueCodec(scalar('string')));
+const strings=['','plain ASCII','"quoted"','back\\slash','雪😀\ufeff','\u2028\u2029',...Array.from({length:128},(_,i)=>String.fromCharCode(i))];
+for(const string of strings){
+ const text=JSON.stringify(string),value=parseJson(text);
+ assert.equal(value.payload.Err.Err.Err.Ok.item0,string);
+ assert.deepEqual(json.parse(text),value);
+ assert.equal(json.stringify(value),text);
+ assert.deepEqual(json.parseBinary(text),values.encode(value));
+ assert.equal(json.stringifyBinary(values.encode(value)),text);
+ assert.equal(stringCodec.parse(text),string);
+ assert.deepEqual(stringCodec.parseBinary(text),stringCodec.values.encode(string));
+ assert.equal(stringCodec.stringifyBinary(stringCodec.values.encode(string)),text);
+}
+for(let code=0;code<32;code++)for(const text of ['"'+String.fromCharCode(code)+'"','{"a'+String.fromCharCode(code)+'":0}']){
+ assert.throws(()=>parseJson(text),SyntaxError);assert.throws(()=>json.parse(text),SyntaxError);assert.throws(()=>json.parseBinary(text),SyntaxError);
+}
+for(const text of ['"\\uD83D\\uDE00"','"a\\\"b"','"\\u0061"','"\\\\"','"\\/"','"\\b\\f\\n\\r\\t"']){
+ const value=parseJson(text);assert.equal(value.payload.Err.Err.Err.Ok.item0,JSON.parse(text));assert.deepEqual(json.parseBinary(text),values.encode(value));
+}
+for(const text of ['"\\x00"','"\\u000"','"\\uZZZZ"','"\\udfff"','"\\ud800x"','"\\ud800\\ud800"','"unterminated','0\u00a0','\u00a0null']){
+ assert.throws(()=>parseJson(text));assert.throws(()=>json.parse(text));assert.throws(()=>json.parseBinary(text));
+}
+for(const token of ['-0','1e10000','123456789012345678901234567890','-1.2500E+0003']){
+ const text=' \t\r\n{"token":'+token+'}\r\n',value=parseJson(text);
+ assert.equal(json.stringify(value),'{"token":'+token+'}');assert.deepEqual(json.parseBinary(text),values.encode(value));
+}
 const mismatched=await createValueCodec(jsonType,{Json:{kind:'record',name:'Json',fields:[{name:'wrong',type:scalar('string')}]}});
 assert.throws(()=>new JsonCodec(mismatched));
 const inheritedMember={value:parseJson('0'),extra:1};Object.setPrototypeOf(inheritedMember,{key:'inherited'});
 const object=parseJson('{"x":0}');object.payload.Err.Err.Err.Err.Err.item0=[inheritedMember];assert.throws(()=>json.stringify(object));
+for(const text of ['[0,1]','{"x":0,"y":1}']){
+ const sparse=parseJson(text),sum=text[0]==='['?sparse.payload.Err.Err.Err.Err.Ok:sparse.payload.Err.Err.Err.Err.Err;
+ delete sum.item0[0];assert.throws(()=>values.validateValue(sparse));assert.throws(()=>json.stringify(sparse));assert.throws(()=>stringifyJson(sparse));
+}
 const typed=new TypedJsonCodec(await createValueCodec({kind:'record',name:'Words',fields:[{name:'wide',type:scalar('u64')},{name:'words',type:{kind:'list',element:scalar('int')}}]}));
 const words=typed.parse('{"wide":18446744073709551615,"words":[1e2,-2]}');assert.equal(words.wide,18446744073709551615n);assert.deepEqual(words.words,[{Int:'100'},{Int:'-2'}]);assert.equal(typed.parse(typed.stringify(words)).wide,words.wide);
 console.log('fused JSON boundaries preserve recursive schemas and exact wire budgets');
@@ -129,6 +166,8 @@ console.log('fused JSON boundaries preserve recursive schemas and exact wire bud
 const ambiguous=parseJson('true');Object.defineProperty(ambiguous.payload,'Ok',{value:{}});assert.throws(()=>json.stringify(ambiguous));
 
 const observed=[],projected=[],sample=values.encode(parseJson('{\"a\":1,\"b\":[2]}'));
+let reentries=0;values.visitSpans(sample,()=>{reentries++;assert.equal(values.validate(sample),true);assert.deepEqual(values.decode(sample),parseJson('{"a":1,"b":[2]}'));});assert.ok(reentries>0);
+const failedVisit=[];assert.throws(()=>values.visitSpans(sample,t=>{failedVisit.push(t.name);throw Error('visitor failure');}));assert.equal(failedVisit.length,1);assert.equal(values.validate(sample),true);
 values.visit(sample,(t,b,d)=>observed.push([t.name,Array.from(b),d]));
 values.visit(sample,(t,b,d)=>projected.push([t.name,Array.from(b),d]),{},['Number','Object']);
 assert.deepEqual(projected,observed.filter(([name])=>name==='Number'||name==='Object'));

@@ -13,26 +13,23 @@ function jsonNumberSpan(bytes,lo,hi){
  return at===hi;
 }
 const jsonWireEncoder=new TextEncoder();
-function jsonUtf8Length(text){let bytes=0;for(let i=0;i<text.length;i++){const c=text.charCodeAt(i);if(c<128)bytes++;else if(c<2048)bytes+=2;else if(c>=0xd800&&c<=0xdbff){bytes+=4;i++;}else bytes+=3;}return bytes;}
+function jsonUtf8Length(text){if(text.length>16&&!/[^\x00-\x7f]/.test(text))return text.length;let bytes=0;for(let i=0;i<text.length;i++){const c=text.charCodeAt(i);if(c<128)bytes++;else if(c<2048)bytes+=2;else if(c>=0xd800&&c<=0xdbff){bytes+=4;i++;}else bytes+=3;}return bytes;}
 const jsonLimits={bytes:16777216,nodes:1000000,depth:128};
 function checkedJsonLimits(options){const l={...jsonLimits,...options};for(const k of ['bytes','nodes','depth'])if(!Number.isSafeInteger(l[k])||l[k]<0||l[k]>jsonLimits[k])throw Error('JSON hard resource limit');return l;}
 function jsonVariant(index,item){let payload=index===0?{}:{item0:item};if(index<5)payload={Ok:payload};for(let i=0;i<index;i++)payload={Err:payload};return {payload};}
 export function parseJson(text,options={}){return parseJsonValue(text,options,null);}
 function parseJsonValue(text,options,boundary){
- const l=checkedJsonLimits(options);if(typeof text!=='string'||!text.isWellFormed()||text.length>l.bytes||jsonUtf8Length(text)>l.bytes)throw Error('JSON byte or Unicode limit');let at=0,remaining=l.nodes;
- const ws=()=>{while(at<text.length&&' \t\r\n'.includes(text[at]))at++;};
- const eat=c=>{ws();if(text[at]===c){at++;return true;}return false;};
- const string=()=>{ws();const start=at;if(!eat('"'))throw Error('expected JSON string');while(at<text.length){if(text[at]==='"'){at++;const v=JSON.parse(text.slice(start,at));if(!v.isWellFormed())throw Error('invalid JSON Unicode');return v;}if(text[at]==='\\')at+=2;else at++;}throw Error('unterminated JSON string');};
+ const p=new JsonWireReader(text,options);
  const value=(d,wireDepth=0)=>{
-  if(d>l.depth||--remaining<0)throw Error('JSON node or depth limit');ws();const c=text[at];
-  if(c==='n'&&text.startsWith('null',at)){boundary?.node(0,wireDepth);at+=4;return jsonVariant(0,null);}if(c==='t'&&text.startsWith('true',at)){boundary?.node(1,wireDepth);at+=4;return jsonVariant(1,true);}if(c==='f'&&text.startsWith('false',at)){boundary?.node(1,wireDepth);at+=5;return jsonVariant(1,false);}
-  if(c==='"'){boundary?.node(3,wireDepth);const item=string();boundary?.text(item);return jsonVariant(3,item);}
-  if(c==='['){boundary?.node(4,wireDepth);at++;const xs=[];if(!eat(']'))while(true){xs.push(value(d+1,wireDepth+8));if(eat(']'))break;if(!eat(','))throw Error('JSON array separator');}return jsonVariant(4,xs);}
-  if(c==='{'){boundary?.node(5,wireDepth);at++;const xs=[],seen=new Set();if(!eat('}'))while(true){const key=string();if(seen.has(key))throw Error('duplicate JSON object key');seen.add(key);boundary?.member(key,wireDepth);if(!eat(':'))throw Error('JSON object colon');xs.push({key,value:value(d+1,wireDepth+9)});if(eat('}'))break;if(!eat(','))throw Error('JSON object separator');}return jsonVariant(5,xs);}
-  if(c==='-'||c>='0'&&c<='9'){const start=at;while(at<text.length&&'-+0123456789.eE'.includes(text[at]))at++;const token=text.slice(start,at);if(!jsonNumberToken(token))throw Error('invalid JSON number');boundary?.node(2,wireDepth);boundary?.text(token);return jsonVariant(2,token);}
+  p.node(d);const c=p.peek();
+  if(c==='n'&&text.startsWith('null',p.at)){boundary?.node(0,wireDepth);p.at+=4;return jsonVariant(0,null);}if(c==='t'&&text.startsWith('true',p.at)){boundary?.node(1,wireDepth);p.at+=4;return jsonVariant(1,true);}if(c==='f'&&text.startsWith('false',p.at)){boundary?.node(1,wireDepth);p.at+=5;return jsonVariant(1,false);}
+  if(c==='"'){boundary?.node(3,wireDepth);const item=p.string();boundary?.text(item);return jsonVariant(3,item);}
+  if(c==='['){boundary?.node(4,wireDepth);p.at++;const xs=[];if(!p.eat(']'))while(true){xs.push(value(d+1,wireDepth+8));if(p.eat(']'))break;if(!p.eat(','))throw Error('JSON array separator');}return jsonVariant(4,xs);}
+  if(c==='{'){boundary?.node(5,wireDepth);p.at++;const xs=[],seen=new Set();if(!p.eat('}'))while(true){const key=p.string();if(seen.has(key))throw Error('duplicate JSON object key');seen.add(key);boundary?.member(key,wireDepth);if(!p.eat(':'))throw Error('JSON object colon');xs.push({key,value:value(d+1,wireDepth+9)});if(p.eat('}'))break;if(!p.eat(','))throw Error('JSON object separator');}return jsonVariant(5,xs);}
+  if(c==='-'||c>='0'&&c<='9'){const token=p.number();boundary?.node(2,wireDepth);boundary?.text(token);return jsonVariant(2,token);}
   throw Error('invalid JSON value');
  };
- const out=value(0);ws();if(at!==text.length)throw Error('trailing JSON text');return out;
+ const out=value(0);p.finish();return out;
 }
 export function stringifyJson(value,options={}){return stringifyJsonValue(value,options,null);}
 function stringifyJsonValue(value,options,boundary){
@@ -48,8 +45,8 @@ function stringifyJsonValue(value,options,boundary){
    case 1:if(typeof item!=='boolean')throw Error('invalid JSON Boolean');emit(item?'true':'false');break;
    case 2:if(!jsonNumberToken(item))throw Error('invalid JSON number');boundary?.text(item);emit(item);break;
    case 3:if(typeof item!=='string'||!item.isWellFormed())throw Error('invalid JSON String');boundary?.text(item);emit(JSON.stringify(item));break;
-   case 4:if(!Array.isArray(item)||item.length>remaining)throw Error('invalid JSON Array');emit('[');item.forEach((x,i)=>{if(i)emit(',');write(x,d+1,wireDepth+8);});emit(']');break;
-   case 5:{if(!Array.isArray(item)||item.length>remaining)throw Error('invalid JSON Object');const seen=new Set();emit('{');item.forEach((m,i)=>{if(!m||Object.keys(m).length!==2||typeof m.key!=='string'||!m.key.isWellFormed()||!Object.hasOwn(m,'value')||boundary&&!Object.hasOwn(m,'key'))throw Error('invalid JSON member');if(seen.has(m.key))throw Error('duplicate JSON object key');seen.add(m.key);boundary?.member(m.key,wireDepth);if(i)emit(',');emit(JSON.stringify(m.key));emit(':');write(m.value,d+1,wireDepth+9);});emit('}');break;}
+   case 4:{if(!Array.isArray(item)||item.length>remaining)throw Error('invalid JSON Array');const count=item.length;let visited=0;emit('[');item.forEach((x,i)=>{visited++;if(i)emit(',');write(x,d+1,wireDepth+8);});if(visited!==count)throw Error('invalid JSON Array');emit(']');break;}
+   case 5:{if(!Array.isArray(item)||item.length>remaining)throw Error('invalid JSON Object');const count=item.length,seen=new Set();let visited=0;emit('{');item.forEach((m,i)=>{visited++;if(!m||Object.keys(m).length!==2||typeof m.key!=='string'||!m.key.isWellFormed()||!Object.hasOwn(m,'value')||boundary&&!Object.hasOwn(m,'key'))throw Error('invalid JSON member');if(seen.has(m.key))throw Error('duplicate JSON object key');seen.add(m.key);boundary?.member(m.key,wireDepth);if(i)emit(',');emit(JSON.stringify(m.key));emit(':');write(m.value,d+1,wireDepth+9);});if(visited!==count)throw Error('invalid JSON Object');emit('}');break;}
   }
  };write(value,0);return parts.join('');
 }
@@ -151,12 +148,19 @@ export class TypedJsonCodec{
 // Token reader shared by schema-directed and arbitrary-JSON wire emission.
 class JsonWireReader{
  constructor(text,options){this.l=checkedJsonLimits(options);if(typeof text!=='string'||!text.isWellFormed()||text.length>this.l.bytes||jsonUtf8Length(text)>this.l.bytes)throw Error('JSON byte or Unicode limit');this.text=text;this.at=0;this.remaining=this.l.nodes;}
- ws(){while(this.at<this.text.length&&' \t\r\n'.includes(this.text[this.at]))this.at++;}
+ ws(){while(this.at<this.text.length){const c=this.text.charCodeAt(this.at);if(c!==32&&c!==9&&c!==10&&c!==13)break;this.at++;}}
  peek(){this.ws();return this.text[this.at];}
  eat(c){this.ws();if(this.text[this.at]===c){this.at++;return true;}return false;}
  node(d){if(d>this.l.depth||--this.remaining<0)throw Error('JSON node or depth limit');}
- string(){this.ws();const start=this.at;if(!this.eat('"'))throw Error('expected JSON string');while(this.at<this.text.length){if(this.text[this.at]==='"'){this.at++;const v=JSON.parse(this.text.slice(start,this.at));if(!v.isWellFormed())throw Error('invalid JSON Unicode');return v;}if(this.text[this.at]==='\\')this.at+=2;else this.at++;}throw Error('unterminated JSON string');}
- leaf(d){this.node(d);const c=this.peek();if(c==='n'&&this.text.startsWith('null',this.at)){this.at+=4;return null;}if(c==='t'&&this.text.startsWith('true',this.at)){this.at+=4;return true;}if(c==='f'&&this.text.startsWith('false',this.at)){this.at+=5;return false;}if(c==='"')return this.string();if(c==='-'||c>='0'&&c<='9'){const start=this.at;while(this.at<this.text.length&&'-+0123456789.eE'.includes(this.text[this.at]))this.at++;const token=this.text.slice(start,this.at);if(!jsonNumberToken(token))throw Error('invalid JSON number');return token;}throw Error('invalid JSON scalar');}
+ string(){
+  this.ws();const start=this.at;if(this.text[start]!=='"')throw Error('expected JSON string');
+  const end=this.text.indexOf('"',start+1);if(end<0)throw Error('unterminated JSON string');
+  const raw=this.text.slice(start+1,end);
+  if(!raw.includes('\\')&&!/[\x00-\x1f]/.test(raw)){this.at=end+1;return raw;}
+  this.at=start+1;while(this.at<this.text.length){if(this.text[this.at]==='"'){this.at++;const v=JSON.parse(this.text.slice(start,this.at));if(!v.isWellFormed())throw Error('invalid JSON Unicode');return v;}if(this.text[this.at]==='\\')this.at+=2;else this.at++;}throw Error('unterminated JSON string');
+ }
+ number(){const start=this.at;while(this.at<this.text.length){const c=this.text.charCodeAt(this.at);if(!(c>=48&&c<=57||c===45||c===43||c===46||c===101||c===69))break;this.at++;}const token=this.text.slice(start,this.at);if(!jsonNumberToken(token))throw Error('invalid JSON number');return token;}
+ leaf(d){this.node(d);const c=this.peek();if(c==='n'&&this.text.startsWith('null',this.at)){this.at+=4;return null;}if(c==='t'&&this.text.startsWith('true',this.at)){this.at+=4;return true;}if(c==='f'&&this.text.startsWith('false',this.at)){this.at+=5;return false;}if(c==='"')return this.string();if(c==='-'||c>='0'&&c<='9')return this.number();throw Error('invalid JSON scalar');}
  finish(){this.ws();if(this.at!==this.text.length)throw Error('trailing JSON text');}
 }
 function streamJsonBinary(values,text,options,typed){

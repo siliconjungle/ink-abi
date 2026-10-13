@@ -109,6 +109,67 @@ class WireDecodeCursor{
  tag(end){if(this.cursor===end||this.bytes[this.cursor]>1)throw Error('wire sum tag');return this.bytes[this.cursor++];}
  text(end){const text=wireDecodeText(this.bytes,this.cursor,end);this.cursor=end;return text;}
 }
+// Bind literal validation and postorder visitation once for every descriptor.
+// No logical carriers are allocated; projection still validates every child.
+function wireScanPlan(root){
+ const seen=new WeakMap();
+ const build=source=>{
+  if(seen.has(source))return seen.get(source);
+  const p={kind:source.kind,type:source.type,scan:null};seen.set(source,p);
+  if(source.fields)p.fields=source.fields.map(f=>({plan:build(f.plan)}));
+  if(source.element)p.element=build(source.element);
+  if(source.ok){p.ok=build(source.ok);p.error=build(source.error);}
+  p.scan=wireScanOperation(p);return p;
+ };
+ return build(root);
+}
+function wireScanOperation(p){
+ const t=p.type;let read;
+ switch(p.kind){
+  case 'unit':read=(r,end)=>{r.size(end,0);return null;};break;
+  case 'bool':read=(r,end)=>{r.size(end,1);const b=r.bytes[r.cursor++];if(b>1)throw Error('invalid wire Bool');return !!b;};break;
+  case 'u32':read=(r,end)=>{r.size(end,4);const n=r.view.getUint32(r.cursor,true);r.cursor=end;return n;};break;
+  case 'i32':read=(r,end)=>{r.size(end,4);const n=r.view.getInt32(r.cursor,true);r.cursor=end;return n;};break;
+  case 'f32':case 'u64':{const size=p.kind==='f32'?4:8;read=(r,end)=>{r.size(end,size);r.cursor=end;};break;}
+  case 'string':read=(r,end)=>{let i=r.cursor;while(i<end&&r.bytes[i]<128)i++;if(i<end)wireDecoder.decode(r.bytes.subarray(r.cursor,end));r.cursor=end;};break;
+  case 'int':case 'id':case 'enum':read=(r,end)=>{const text=r.text(end);if(p.kind==='int'&&!wireDecimal(text)||p.kind==='id'&&!/^[0-9a-f]{32}$/.test(text)||p.kind==='enum'&&!t.variants.includes(text))throw Error('malformed wire text');};break;
+  case 'list':case 'vector':{
+   const element=p.element,size=p.kind==='vector'?t.size:null;
+   read=(r,end,d)=>{if(r.cursor+4>end)throw Error('wire list count');const n=r.view.getUint32(r.cursor,true);r.cursor+=4;if(n>r.remaining||n>Math.floor((end-r.cursor)/4)||size!==null&&n!==size)throw Error('wire sequence size');for(let i=0;i<n;i++)element.scan(r,end,d+1);};break;
+  }
+  case 'record':{
+   const fs=p.fields;
+   switch(fs.length){
+    case 0:read=()=>{};break;
+    case 1:read=(r,end,d)=>{fs[0].plan.scan(r,end,d+1);};break;
+    case 2:read=(r,end,d)=>{fs[0].plan.scan(r,end,d+1);fs[1].plan.scan(r,end,d+1);};break;
+    case 3:read=(r,end,d)=>{fs[0].plan.scan(r,end,d+1);fs[1].plan.scan(r,end,d+1);fs[2].plan.scan(r,end,d+1);};break;
+    case 4:read=(r,end,d)=>{fs[0].plan.scan(r,end,d+1);fs[1].plan.scan(r,end,d+1);fs[2].plan.scan(r,end,d+1);fs[3].plan.scan(r,end,d+1);};break;
+    default:read=(r,end,d)=>{for(const f of fs)f.plan.scan(r,end,d+1);};
+   }break;
+  }
+  case 'option':read=(r,end,d)=>{if(r.tag(end))p.element.scan(r,end,d+1);};break;
+  case 'result':read=(r,end,d)=>{(r.tag(end)?p.error:p.ok).scan(r,end,d+1);};break;
+  default:read=()=>{throw Error('unsupported wire kind');};
+ }
+ return (r,parentEnd,d)=>{
+  const end=r.enter(parentEnd,d),start=r.cursor,value=read(r,end,d);if(r.cursor!==end)throw Error('trailing wire frame bytes');
+  const visitor=r.visitor;if(visitor&&(!r.selected||r.selected.has(t.name))){if(r.spans)visitor(t,r.bytes,start,end,d);else visitor(t,r.bytes.subarray(start,end),d);}
+  return value;
+ };
+}
+// Separate methods keep decoding's cursor callsites monomorphic. Both cursors
+// are checked against the independent generic scanner and malformed fixtures.
+class WireScanCursor{
+ constructor(bytes,view,limits,visitor,selected,spans){this.bytes=bytes;this.view=view;this.cursor=40;this.remaining=limits.nodes;this.depth=limits.depth;this.visitor=visitor;this.selected=selected;this.spans=spans;}
+ enter(parentEnd,d){
+  if(d>this.depth||--this.remaining<0||this.cursor+4>parentEnd)throw Error('wire node, depth or length limit');
+  const start=this.cursor+4,end=start+this.view.getUint32(this.cursor,true);if(end>parentEnd)throw Error('truncated wire frame');this.cursor=start;return end;
+ }
+ size(end,n){if(end-this.cursor!==n)throw Error('malformed wire scalar');}
+ tag(end){if(this.cursor===end||this.bytes[this.cursor]>1)throw Error('wire sum tag');return this.bytes[this.cursor++];}
+ text(end){const text=wireDecodeText(this.bytes,this.cursor,end);this.cursor=end;return text;}
+}
 function compactDecodeOperation(p){
  const t=p.type;let read;
  switch(p.kind){
@@ -319,6 +380,7 @@ export class ValueCodec{
  #compactCodec;
  #encoder;
  #decodeBound=false;
+ #scanPlan=null;
  get descriptor(){return this.#descriptor;}
  constructor(descriptor){
   // This synchronous path is for compiler-generated immutable metadata. For
@@ -347,6 +409,7 @@ export class ValueCodec{
   for(let i=0;i<10;i++)if(view.getUint32(i*4,true)!==this.#headerWords[i])throw Error('wire format or schema mismatch');
   if(names!==null&&(!Array.isArray(names)||names.length>100000||names.some(n=>typeof n!=='string')))throw Error('wire visitor names');
   if(materialize&&!visitor){this.#decodeBound||=wireBindDecodePlan(this.#valuePlan);const cursor=new WireDecodeCursor(bytes,view,l),value=this.#valuePlan.decode(cursor,bytes.length,0);if(cursor.cursor!==bytes.length)throw Error('trailing wire bytes');return value;}
+  if(!materialize){this.#scanPlan??=wireScanPlan(this.#valuePlan);const cursor=new WireScanCursor(bytes,view,l,visitor,names===null?null:new Set(names),spans),value=this.#scanPlan.scan(cursor,bytes.length,0);if(cursor.cursor!==bytes.length)throw Error('trailing wire bytes');return value;}
   return wireScanValue(this.#valuePlan,bytes,view,l,materialize,visitor,names===null?null:new Set(names),spans);
  }
  visit(bytes,visitor,options={},names=null){if(typeof visitor!=='function')throw Error('wire visitor required');this.scan(bytes,options,false,visitor,names);}
