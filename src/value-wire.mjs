@@ -1,5 +1,8 @@
 // Shared bounded binary codec; generated code supplies exact descriptors.
 export const valueWireFormat='ink-value-wire-v1';
+// A connection agrees on the complete value schema before using this format.
+// Version byte + schema-directed fields; schema identity is out of band.
+export const compactValueWireFormat='ink-value-session-v1';
 const wireMagic=Uint8Array.of(73,78,75,86,65,76,0,1);
 const wireEncoder=new TextEncoder(),wireDecoder=new TextDecoder('utf-8',{fatal:true,ignoreBOM:true});
 const wireDefaults={bytes:16777216,nodes:1000000,depth:128};
@@ -41,6 +44,61 @@ function wireValuePlan(codec){
  };return build(codec.descriptor.root);
 }
 function wireInvalidValue(){throw Error('invalid value for wire schema');}
+// Emit the cached literal schema with one forward writer. Each value is checked
+// where it is consumed; byte bounds belong to the writer, not a second size walk.
+function wireEncodeValue(root,value,l,w){
+ let remaining=l.nodes;
+ const node=(p,v,d)=>{
+  if(d>l.depth||--remaining<0)throw Error('wire node or depth limit');
+  const t=p.type,start=w.beginNode();
+  switch(p.kind){
+   case 'unit':if(v!==null)wireInvalidValue();break;
+   case 'bool':if(typeof v!=='boolean')wireInvalidValue();w.byte(+v);break;
+   case 'u32':case 'i32':{
+    const min=p.kind==='u32'?0:-2147483648,max=p.kind==='u32'?4294967295:2147483647;
+    if(typeof v!=='number'||!Number.isInteger(v)||v<min||v>max)wireInvalidValue();w.word(v>>>0);break;
+   }
+   case 'u64':{
+    const kind=typeof v;
+    if(kind==='number'&&!Number.isSafeInteger(v)||kind!=='bigint'&&kind!=='number'&&kind!=='string'||kind==='string'&&(!wireDecimal(v)||v.startsWith('-')))wireInvalidValue();
+    const n=BigInt(v);if(n<0n||n>18446744073709551615n)wireInvalidValue();w.wide(n);break;
+   }
+   case 'f32':{
+    let bits;
+    if(typeof v==='number'&&Number.isFinite(v)){wireFloat.setFloat32(0,v,true);if(!Number.isFinite(wireFloat.getFloat32(0,true)))wireInvalidValue();bits=wireFloat.getUint32(0,true);}
+    else{if(!wireTagged(v,'F32Bits'))wireInvalidValue();bits=v.F32Bits;if(!Number.isInteger(bits)||bits<0||bits>4294967295)wireInvalidValue();}
+    w.word(bits);break;
+   }
+   case 'string':case 'int':case 'id':case 'enum':{
+    const text=p.kind==='int'?(typeof v==='bigint'?v.toString():wireTagged(v,'Int')?v.Int:null):v;
+    if(p.kind==='int'&&!wireDecimal(text)||p.kind==='id'&&(typeof text!=='string'||!/^[0-9a-f]{32}$/.test(text))||p.kind==='enum'&&!t.variants.includes(text))wireInvalidValue();
+    w.text(text);break;
+   }
+   case 'list':case 'vector':{
+    if(!Array.isArray(v)&&!(ArrayBuffer.isView(v)&&!(v instanceof DataView)))wireInvalidValue();
+    if(v.length>remaining||p.kind==='vector'&&v.length!==t.size)wireInvalidValue();
+    w.count(v.length);for(let i=0;i<v.length;i++)node(p.element,v[i],d+1);break;
+   }
+   case 'record':{
+    const fs=p.fields;
+    if(!v||typeof v!=='object'||Array.isArray(v)||Object.keys(v).length!==fs.length)wireInvalidValue();
+    for(let i=0;i<fs.length;i++)if(!wireOwn(v,fs[i].name))wireInvalidValue();
+    for(let i=0;i<fs.length;i++){const f=fs[i];node(f.plan,v[f.name],d+1);}break;
+   }
+   case 'option':{
+    if(wireTagged(v,'None')&&v.None===null)w.byte(0);
+    else if(wireTagged(v,'Some')){w.byte(1);node(p.element,v.Some,d+1);}else wireInvalidValue();break;
+   }
+   case 'result':{
+    if(wireTagged(v,'Ok')){w.byte(0);node(p.ok,v.Ok,d+1);}
+    else if(wireTagged(v,'Err')){w.byte(1);node(p.error,v.Err,d+1);}else wireInvalidValue();break;
+   }
+   default:throw Error('unsupported wire kind');
+  }
+  w.endNode(start);
+ };
+ node(root,value,0);
+}
 function wireCheckValue(root,value,l){
  let remaining=l.nodes,total=40;
  const add=n=>{total+=n;if(total>l.bytes)throw Error('wire byte limit');};
@@ -148,6 +206,7 @@ export class ValueCodec{
  #hash;
  #descriptor;
  #valuePlan;
+ #compactCodec;
  get descriptor(){return this.#descriptor;}
  constructor(descriptor){
   // This synchronous path is for compiler-generated immutable metadata. For
@@ -158,60 +217,9 @@ export class ValueCodec{
  }
  resolve(t){for(let i=0;i<64;i++){if(t.kind!=='ref')return t;t=this.descriptor.named[t.name];if(!t)throw Error('wire reference');}throw Error('wire reference cycle');}
  validateValue(value,options={}){wireCheckValue(this.#valuePlan,value,wireLimits(options));return true;}
+ compact(){return this.#compactCodec??=new CompactValueCodec(this);}
  encode(value,options={}){
-  const w=new WireEncoder(options);w.bytes(wireMagic);w.bytes(this.#hash);this.#walkValue(value,options,w);return w.finish();
- }
- #walkValue(value,options,w){
-  const l=wireLimits(options);let remaining=l.nodes,total=40;
-  const add=n=>{total+=n;if(total>l.bytes)throw Error('wire byte limit');};
-  const node=(type,v,d)=>{
-   if(d>l.depth||--remaining<0)throw Error('wire node or depth limit');const t=this.resolve(type),start=w?.position;
-   if(w)w.word(0);
-   const bad=()=>{throw Error('invalid value for wire schema');};
-   switch(t.kind){
-    case 'unit':if(v!==null)bad();add(4);break;
-    case 'bool':if(typeof v!=='boolean')bad();add(5);if(w)w.byte(+v);break;
-    case 'u32':case 'i32':{
-     const min=t.kind==='u32'?0:-2147483648,max=t.kind==='u32'?4294967295:2147483647;
-     if(typeof v!=='number'||!Number.isInteger(v)||v<min||v>max)bad();add(8);if(w)w.word(v>>>0);break;
-    }
-    case 'u64':{
-     if(typeof v==='number'&&!Number.isSafeInteger(v)||!['bigint','number','string'].includes(typeof v)||typeof v==='string'&&(!wireDecimal(v)||v.startsWith('-')))bad();
-     const n=BigInt(v);if(n<0n||n>18446744073709551615n)bad();add(12);if(w)w.wide(n);break;
-    }
-    case 'f32':{
-     let bits;
-     if(typeof v==='number'&&Number.isFinite(v)){wireFloat.setFloat32(0,v,true);if(!Number.isFinite(wireFloat.getFloat32(0,true)))bad();bits=wireFloat.getUint32(0,true);}
-     else{if(!wireTagged(v,'F32Bits'))bad();bits=v.F32Bits;if(!Number.isInteger(bits)||bits<0||bits>4294967295)bad();}
-     add(8);if(w)w.word(bits);break;
-    }
-    case 'string':case 'int':case 'id':case 'enum':{
-     const text=t.kind==='int'?(typeof v==='bigint'?v.toString():wireTagged(v,'Int')?v.Int:null):v;
-     if(typeof text!=='string'||!text.isWellFormed()||text.length>l.bytes)bad();
-     if(t.kind==='int'&&!wireDecimal(text)||t.kind==='id'&&!/^[0-9a-f]{32}$/.test(text)||t.kind==='enum'&&!t.variants.includes(text))bad();
-     add(4+wireUtf8Length(text));if(w)w.text(text);break;
-    }
-    case 'list':case 'vector':{
-     if(!Array.isArray(v)&&!(ArrayBuffer.isView(v)&&!(v instanceof DataView)))bad();if(v.length>remaining||t.kind==='vector'&&v.length!==t.size)bad();
-     add(8);if(w)w.word(v.length);for(let i=0;i<v.length;i++)node(t.element,v[i],d+1);break;
-    }
-    case 'record':{
-     if(!v||typeof v!=='object'||Array.isArray(v)||Object.keys(v).length!==t.fields.length||t.fields.some(f=>!wireOwn(v,f.name)))bad();
-     add(4);for(const f of t.fields)node(f.type,v[f.name],d+1);break;
-    }
-    case 'option':case 'result':{
-     let tag,child;
-     if(t.kind==='option'){
-      if(wireTagged(v,'None')&&v.None===null)tag=0;
-      else if(wireTagged(v,'Some')){tag=1;child=t.element;}else bad();
-     }else if(wireTagged(v,'Ok')){tag=0;child=t.ok;}else if(wireTagged(v,'Err')){tag=1;child=t.error;}else bad();
-     add(5);if(w)w.byte(tag);if(child)node(child,v[t.kind==='option'?'Some':tag?'Err':'Ok'],d+1);break;
-    }
-    default:throw Error('unsupported wire kind');
-   }
-   if(w)w.patchWord(start,w.position-start-4);
-  };
-  node(this.descriptor.root,value,0);if(total>l.bytes)throw Error('wire byte limit');
+  const l=wireLimits(options),w=new WireEncoder(l);w.bytes(wireMagic);w.bytes(this.#hash);wireEncodeValue(this.#valuePlan,value,l,w);return w.finish();
  }
  encodeWith(emit,options={}){
   const w=new WireEncoder(options);w.bytes(wireMagic);w.bytes(this.#hash);emit(w);const bytes=w.finish();this.validate(bytes,options);return bytes;
@@ -233,6 +241,9 @@ class WireEncoder{
  #data=new Uint8Array(256);#view=new DataView(this.#data.buffer);#at=0;#remaining;#depth=0;#limits;
  constructor(options){this.#limits=wireLimits(options);this.#remaining=this.#limits.nodes;}
  get position(){return this.#at;}
+ beginNode(){const at=this.#at;this.word(0);return at;}
+ endNode(at){this.patchWord(at,this.#at-at-4);}
+ count(n){this.word(n);}
  #reserve(size){
   const end=this.#at+size;if(end>this.#limits.bytes)throw Error('wire byte limit');
   if(end>this.#data.length){const next=new Uint8Array(Math.min(this.#limits.bytes,Math.max(end,this.#data.length*2)));next.set(this.#data.subarray(0,this.#at));this.#data=next;this.#view=new DataView(next.buffer);}
@@ -253,4 +264,85 @@ class WireEncoder{
   const copy=this.#data.slice(start,this.#at);at=start;for(const [a,b] of spans){this.#data.set(copy.subarray(a-start,b-start),at);at+=b-a;}
  }
  finish(){return this.#data.slice(0,this.#at);}
+}
+
+class CompactWireEncoder extends WireEncoder{
+ beginNode(){return 0;}
+ endNode(){}
+ count(n){
+  if(!Number.isInteger(n)||n<0||n>4294967295)throw Error('compact count range');
+  while(n>=128){this.byte(n%128+128);n=Math.floor(n/128);}this.byte(n);
+ }
+ text(text){if(typeof text!=='string'||!text.isWellFormed())throw Error('wire Unicode');this.count(wireUtf8Length(text));super.text(text);}
+}
+
+function compactScanValue(root,bytes,l,materialize){
+ const view=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);let cursor=1,remaining=l.nodes;
+ const require=n=>{if(n>bytes.length-cursor)throw Error('truncated compact value');};
+ const count=()=>{
+  let value=0,scale=1;
+  for(let i=0;i<5;i++){
+   require(1);const byte=bytes[cursor++];
+   if(i===4&&byte>15)throw Error('compact count overflow');
+   value+=(byte&127)*scale;
+   if(byte<128){if(i>0&&byte===0)throw Error('noncanonical compact count');return value;}
+   scale*=128;
+  }throw Error('compact count overflow');
+ };
+ const property={value:null,enumerable:true,writable:true,configurable:true};
+ const node=(p,d)=>{
+  if(d>l.depth||--remaining<0)throw Error('wire node or depth limit');
+  const t=p.type;let value;
+  switch(p.kind){
+   case 'unit':return null;
+   case 'bool':require(1);if(bytes[cursor]>1)throw Error('invalid wire Bool');return !!bytes[cursor++];
+   case 'u32':case 'i32':require(4);value=p.kind==='u32'?view.getUint32(cursor,true):view.getInt32(cursor,true);cursor+=4;return value;
+   case 'f32':require(4);if(materialize)value={F32Bits:view.getUint32(cursor,true)};cursor+=4;return value;
+   case 'u64':require(8);if(materialize)value=view.getBigUint64(cursor,true);cursor+=8;return value;
+   case 'string':case 'int':case 'id':case 'enum':{
+    const n=count();require(n);const start=cursor;cursor+=n;
+    if(p.kind==='string'&&!materialize){let i=start;while(i<cursor&&bytes[i]<128)i++;if(i<cursor)wireDecoder.decode(bytes.subarray(start,cursor));}
+    else{const text=wireDecoder.decode(bytes.subarray(start,cursor));if(p.kind==='int'&&!wireDecimal(text)||p.kind==='id'&&!/^[0-9a-f]{32}$/.test(text)||p.kind==='enum'&&!t.variants.includes(text))throw Error('malformed wire text');if(materialize)value=p.kind==='int'?{Int:text}:text;}
+    return value;
+   }
+   case 'list':case 'vector':{
+    const n=count();if(n>remaining||p.kind==='vector'&&n!==t.size)throw Error('wire sequence size');
+    if(materialize)value=[];for(let i=0;i<n;i++){const child=node(p.element,d+1);if(materialize)value.push(child);}return value;
+   }
+   case 'record':{
+    const fs=p.fields;
+    if(materialize&&fs.length<=4){
+     switch(fs.length){case 0:return {};case 1:return {[fs[0].name]:node(fs[0].plan,d+1)};case 2:return {[fs[0].name]:node(fs[0].plan,d+1),[fs[1].name]:node(fs[1].plan,d+1)};case 3:return {[fs[0].name]:node(fs[0].plan,d+1),[fs[1].name]:node(fs[1].plan,d+1),[fs[2].name]:node(fs[2].plan,d+1)};case 4:return {[fs[0].name]:node(fs[0].plan,d+1),[fs[1].name]:node(fs[1].plan,d+1),[fs[2].name]:node(fs[2].plan,d+1),[fs[3].name]:node(fs[3].plan,d+1)};}
+    }
+    if(materialize)value={};for(const f of fs){const child=node(f.plan,d+1);if(materialize){property.value=child;Object.defineProperty(value,f.name,property);}}return value;
+   }
+   case 'option':case 'result':{
+    require(1);const tag=bytes[cursor++];if(tag>1)throw Error('wire sum tag');
+    if(p.kind==='option'&&tag===0)return materialize?{None:null}:undefined;
+    const label=p.kind==='option'?'Some':tag===0?'Ok':'Err',child=node(p.kind==='option'?p.element:tag===0?p.ok:p.error,d+1);
+    return materialize?{[label]:child}:undefined;
+   }
+   default:throw Error('unsupported wire kind');
+  }
+ };
+ const value=node(root,0);if(cursor!==bytes.length)throw Error('trailing compact bytes');return value;
+}
+
+// General transport codec, independent of source rewrites and checkpoints.
+// The sender/receiver must negotiate this exact identity and format. There is
+// deliberately no claim that the bytes themselves identify their schema.
+export class CompactValueCodec{
+ #source;#plan;
+ get format(){return compactValueWireFormat;}
+ get identity(){return this.#source.descriptor.identity;}
+ constructor(valueCodec){if(!(valueCodec instanceof ValueCodec))throw Error('compact codec requires a checked value codec');this.#source=valueCodec;this.#plan=wireValuePlan(valueCodec);}
+ encode(value,options={}){const l=wireLimits(options),w=new CompactWireEncoder(l);w.byte(1);wireEncodeValue(this.#plan,value,l,w);return w.finish();}
+ #scan(bytes,options,materialize){
+  const l=wireLimits(options);
+  if(!(bytes instanceof Uint8Array)||typeof SharedArrayBuffer==='function'&&bytes.buffer instanceof SharedArrayBuffer||bytes.length<1||bytes.length>l.bytes)throw Error('wire byte limit or header');
+  if(bytes[0]!==1)throw Error('compact format mismatch');
+  return compactScanValue(this.#plan,bytes,l,materialize);
+ }
+ decode(bytes,options={}){return this.#scan(bytes,options,true);}
+ validate(bytes,options={}){this.#scan(bytes,options,false);return true;}
 }

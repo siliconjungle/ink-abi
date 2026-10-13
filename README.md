@@ -70,3 +70,31 @@ Untrusted descriptors use async `createValueCodec`; the synchronous constructor
 consumes trusted compiler metadata. Keep transport, codec checking and mathematical
 rewrite authority separate. See the distribution's `docs/json-and-portable-values.md`
 and run `cargo test --locked`, including cross-language adversarial fixtures.
+
+### Agreed-schema JavaScript transport
+
+`valueCodec.compact()` returns a cached `CompactValueCodec` with the exact same
+schema identity. Both peers must agree on that identity and
+`ink-value-session-v1` before exchanging bytes. The buffer cannot identify its
+own schema. This is an explicit transport choice, not a change to
+`ink-value-wire-v1`, native ABI values or portable state checkpoints.
+
+A message begins with byte `1`. Records concatenate declaration-order children;
+Unit has no payload. Bool and Option/Result discriminants occupy one byte. Words
+and raw f32 bits retain the portable format's fixed little-endian representation.
+Strings, exact Int, IDs and enums carry a canonical unsigned LEB128 byte length
+and UTF-8. Lists/vectors carry a canonical unsigned LEB128 element count. Counts
+are at most u32 and use at most five bytes; redundant leading groups reject.
+There are no per-node frame lengths or per-message schema hashes. The same hard
+byte/node/depth limits apply, counting the version byte and every logical node.
+
+`encode`, `decode` and `validate` check all schema constraints. Decoding returns
+owned values and encoding returns a fresh byte buffer. SharedArrayBuffer,
+truncated scalars/text, invalid Unicode/tags/counts and trailing bytes reject.
+Raw non-finite f32 bits and exact decimal Int survive. The implementation is
+currently JavaScript; compiled JavaScript modules expose `callCompact` for pure
+functions, with the same preconditions and results as `callBinary`.
+
+These operational codecs are trusted implementations validated by adversarial
+fixtures and source/reference comparisons. Tests are not formal codec round-trip
+proofs, and a transport negotiation or measurement grants no rewrite authority.

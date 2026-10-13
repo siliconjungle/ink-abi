@@ -22,13 +22,54 @@ const samples=[null,true,false,0,-0,1,-1,4294967295,4294967296,-2147483648,-2147
 const inherited=Object.assign(Object.create({extra:1}),{Ok:1});samples.push(inherited);
 const hidden={Ok:1};Object.defineProperty(hidden,'extra',{value:1});samples.push(hidden);
 const outcome=(run,value,limits)=>{try{run(value,limits);return true;}catch{return false;}};
+// Independent framing oracle: recurse over descriptors through the public
+// forward writer, rather than the compiled encode plan. Inputs are decoded
+// canonical carriers, so the oracle only specifies bytes, not validation.
+function referenceBytes(codec,value){
+ return codec.encodeWith(w=>{
+  const emit=(type,v)=>{const t=codec.resolve(type);w.frame(()=>{
+   switch(t.kind){
+    case 'unit':break;
+    case 'bool':w.byte(+v);break;
+    case 'u32':case 'i32':w.word(v>>>0);break;
+    case 'u64':w.wide(v);break;
+    case 'f32':w.word(v.F32Bits);break;
+    case 'int':w.text(v.Int);break;
+    case 'string':case 'id':case 'enum':w.text(v);break;
+    case 'record':for(const f of t.fields)emit(f.type,v[f.name]);break;
+    case 'list':case 'vector':w.word(v.length);for(const item of v)emit(t.element,item);break;
+    case 'option':if(Object.hasOwn(v,'None'))w.byte(0);else{w.byte(1);emit(t.element,v.Some);}break;
+    case 'result':if(Object.hasOwn(v,'Ok')){w.byte(0);emit(t.ok,v.Ok);}else{w.byte(1);emit(t.error,v.Err);}break;
+    default:throw Error('unsupported oracle kind');
+   }
+  });};emit(codec.descriptor.root,value);
+ });
+}
 for(const type of types){
  const codec=await createValueCodec(type,type===node?{Node:node}:{});
  for(const value of samples){
   assert.equal(outcome((v,l)=>codec.validateValue(v,l),value,{}),outcome((v,l)=>codec.encode(v,l),value,{}));
+  assert.equal(outcome(v=>codec.compact().encode(v),value),outcome(v=>codec.encode(v),value));
   if(!outcome(v=>codec.encode(v),value,{}))continue;
   const bytes=codec.encode(value);
   assert.equal(codec.validate(bytes),true);assert.deepEqual(codec.encode(codec.decode(bytes)),bytes);
+  assert.deepEqual(referenceBytes(codec,codec.decode(bytes)),bytes);
+  const compact=codec.compact(),short=compact.encode(value);
+  assert.equal(compact,codec.compact());assert.equal(compact.identity,codec.descriptor.identity);
+  assert.equal(compact.validate(short),true);assert.deepEqual(compact.decode(short),codec.decode(bytes));
+  assert.deepEqual(compact.encode(compact.decode(short)),short);
+  const paddedCompact=new Uint8Array(short.length+7);paddedCompact.set(short,7);
+  assert.deepEqual(compact.decode(paddedCompact.subarray(7)),codec.decode(bytes));
+  assert.throws(()=>compact.decode(new Uint8Array([...short,0])));
+  for(let end=0;end<short.length;end++)assert.throws(()=>compact.decode(short.subarray(0,end)));
+  assert.equal(outcome(v=>compact.encode(v,{bytes:short.length}),value),true);
+  assert.equal(outcome(v=>compact.encode(v,{bytes:short.length-1}),value),false);
+  for(const l of [{nodes:0},{nodes:1},{nodes:2},{nodes:4},{depth:0},{depth:1},{depth:3},{depth:6}]){
+   const accepted=outcome(v=>codec.encode(v,l),value);
+   assert.equal(outcome(v=>compact.encode(v,l),value),accepted);
+   assert.equal(outcome(()=>compact.validate(short,l)),accepted);
+   assert.equal(outcome(()=>compact.decode(short,l)),accepted);
+  }
   for(const limits of [{bytes:bytes.length},{bytes:bytes.length-1},{nodes:0},{nodes:1},{nodes:2},{nodes:4},{depth:0},{depth:1},{depth:3},{depth:6}])
    assert.equal(outcome((v,l)=>codec.validateValue(v,l),value,limits),outcome((v,l)=>codec.encode(v,l),value,limits),JSON.stringify(limits));
  }
@@ -41,6 +82,7 @@ console.log('logical value validation agrees with independent forward encoding')
 
 // Capture a raw scalar field once, including ordinary getter-backed inputs.
 const float=await createValueCodec(scalar('f32'));let reads=0;const getter={get F32Bits(){return reads++===0?0:4294967296;}};assert.equal(float.validateValue(getter),true);assert.equal(reads,1);
+reads=0;assert.deepEqual(float.encode(getter),float.encode({F32Bits:0}));assert.equal(reads,1);
 
 // JSON construction/rendering may fuse schema checking only when the complete
 // recursive schema agrees. Compare acceptance with the separate general checker.
@@ -54,6 +96,8 @@ const values=await createValueCodec(jsonType,{Json:jsonType}),json=new JsonCodec
 const texts=['null','true','false','0','-0','1e10000','"\\ufeff雪😀"','[]','{}','[null,false,0,"x"]','{"a":1,"unknown":{"nested":[true,1e10000]}}','[{"x":[false,null]}]'];
 for(const text of texts){
  const value=parseJson(text),bytes=values.encode(value).length,limits=[{},...[0,1,2,3,4,6,7,8,9,15,32].map(nodes=>({nodes})),...[0,1,2,4,7,8,10,16,128].map(depth=>({depth})),...[0,40,44,bytes-1,bytes,bytes+1].map(bytes=>({bytes}))];
+ assert.deepEqual(values.encode(value),referenceBytes(values,value));
+ assert.deepEqual(values.compact().decode(values.compact().encode(value)),value);
  assert.deepEqual(json.parse(text),value);assert.equal(json.stringify(value),stringifyJson(value));
  for(const l of limits){
   const expectedParse=outcome(t=>{const v=parseJson(t,l);values.validateValue(v,l);},text,l);
@@ -86,3 +130,20 @@ try{assert.deepEqual(values.decode(values.encode(parseJson('[1,true,\"x\"]'))),p
 
 const padded=new Uint8Array(sample.length+7);padded.set(sample,7);const sliced=padded.subarray(7),spans=[];values.visitSpans(sliced,(t,data,lo,hi,d)=>spans.push([t.name,Array.from(data.subarray(lo,hi)),d]),{},['Number','Object']);assert.deepEqual(spans,projected);assert.equal(json.validateBinary(sliced),true);
 for(const token of ['0','-0','1.2e+300','1e10000','01','-','1.','1e','1e+','+1','1\n','\ufeff1','雪','']){const v=parseJson('1');v.payload.Err.Err.Ok.item0=token;const bytes=values.encode(v);assert.equal(outcome(()=>json.validateBinary(bytes)),outcome(()=>json.stringify(v)),token);}
+
+// Session format has canonical bounded counts and exact little-endian scalars.
+const compactString=(await createValueCodec(scalar('string'))).compact();
+assert.deepEqual(compactString.encode('雪'),Uint8Array.of(1,3,0xe9,0x9b,0xaa));
+for(const invalid of [[2,0],[1,0x80,0],[1,0x80,0x80,0x80,0x80,0x10],[1,0x80,0x80,0x80,0x80,0x80],[1,1,0xff]])assert.throws(()=>compactString.decode(Uint8Array.from(invalid)));
+const compactWord=(await createValueCodec(scalar('u32'))).compact();assert.deepEqual(compactWord.encode(0x12345678),Uint8Array.of(1,0x78,0x56,0x34,0x12));
+const compactList=(await createValueCodec({kind:'list',element:scalar('unit')})).compact();
+assert.deepEqual(compactList.encode([null,null]),Uint8Array.of(1,2));
+assert.throws(()=>compactList.decode(Uint8Array.of(1,0xff,0xff,0xff,0xff,0x0f)));
+for(const [n,prefix] of [[127,[127]],[128,[128,1]],[16383,[255,127]],[16384,[128,128,1]]]){
+ const list=new Array(n).fill(null),bytes=compactList.encode(list);
+ assert.deepEqual(bytes,Uint8Array.from([1,...prefix]));assert.deepEqual(compactList.decode(bytes),list);
+ assert.throws(()=>compactList.decode(bytes,{nodes:n}));
+}
+assert.throws(()=>compactString.decode(new Uint8Array(new SharedArrayBuffer(4))));
+const compactCycle=codec.compact();assert.throws(()=>compactCycle.encode(cycle));
+console.log('compact transport preserves typed values, canonical counts, ownership and resource bounds');
