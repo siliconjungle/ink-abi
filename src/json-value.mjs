@@ -33,8 +33,8 @@ function parseJsonValue(text,options,boundary){
 }
 export function stringifyJson(value,options={}){return stringifyJsonValue(value,options,null);}
 function stringifyJsonValue(value,options,boundary){
- const l=checkedJsonLimits(options);let remaining=l.nodes,bytes=0;const parts=[];
- const emit=s=>{bytes+=jsonUtf8Length(s);if(bytes>l.bytes)throw Error('JSON byte limit');parts.push(s);};
+ const l=checkedJsonLimits(options);let remaining=l.nodes,bytes=0,output='';
+ const emit=s=>{bytes+=jsonUtf8Length(s);if(bytes>l.bytes)throw Error('JSON byte limit');output+=s;};
  const write=(v,d,wireDepth=0)=>{
   if(d>l.depth||--remaining<0)throw Error('JSON node or depth limit');if(!v||Object.keys(v).length!==1||!Object.hasOwn(v,'payload'))throw Error('invalid JSON record');let p=v.payload,index=0;
   while(index<5&&p&&Object.hasOwn(p,'Err')){if(Object.keys(p).length!==1||boundary&&Object.hasOwn(p,'Ok'))throw Error('invalid JSON sum');p=p.Err;index++;}
@@ -48,7 +48,7 @@ function stringifyJsonValue(value,options,boundary){
    case 4:{if(!Array.isArray(item)||item.length>remaining)throw Error('invalid JSON Array');const count=item.length;let visited=0;emit('[');item.forEach((x,i)=>{visited++;if(i)emit(',');write(x,d+1,wireDepth+8);});if(visited!==count)throw Error('invalid JSON Array');emit(']');break;}
    case 5:{if(!Array.isArray(item)||item.length>remaining)throw Error('invalid JSON Object');const count=item.length,seen=new Set();let visited=0;emit('{');item.forEach((m,i)=>{visited++;if(!m||Object.keys(m).length!==2||typeof m.key!=='string'||!m.key.isWellFormed()||!Object.hasOwn(m,'value')||boundary&&!Object.hasOwn(m,'key'))throw Error('invalid JSON member');if(seen.has(m.key))throw Error('duplicate JSON object key');seen.add(m.key);boundary?.member(m.key,wireDepth);if(i)emit(',');emit(JSON.stringify(m.key));emit(':');write(m.value,d+1,wireDepth+9);});if(visited!==count)throw Error('invalid JSON Object');emit('}');break;}
   }
- };write(value,0);return parts.join('');
+ };write(value,0);return output;
 }
 // The adapter's schema is the fixed recursive JSON library shape checked by
 // JsonCodec. Charge its ordinary record/sum/list wire nodes while parsing or

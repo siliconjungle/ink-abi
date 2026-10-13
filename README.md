@@ -71,6 +71,10 @@ conversion uses logical validation or direct binary emission as appropriate;
 neither path constructs and discards a second encoded document.
 `JsonCodec` fuses the same encoded byte/node/depth accounting into text parsing
 and rendering after checking the complete recursive JSON schema.
+Logical JSON rendering accumulates a bounded string directly. It preserves exact
+numeric tokens, member order, duplicate rejection and Unicode checks; consumers
+may still incur string flattening, so performance evidence includes complete
+UTF-8 output consumption as well as returned text.
 `ValueCodec.visitSpans(bytes, visitor, limits, names)` supplies validated node body
 offsets without allocating a byte view per callback. The optional nominal-name
 filter suppresses callbacks only; all nodes still undergo structural validation.

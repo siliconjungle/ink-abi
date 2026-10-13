@@ -155,7 +155,7 @@ for(const text of ['{"a":1,"\\u0061":2}','"\\ud800"','[0,]','01','null trailing'
 // The cursor fast path must match escaped-string parsing, preserve exact
 // number lexemes, and enforce identical text/wire limits in both adapters.
 const stringCodec=new TypedJsonCodec(await createValueCodec(scalar('string')));
-const strings=['','plain ASCII','"quoted"','back\\slash','雪😀\ufeff','\u2028\u2029',...Array.from({length:128},(_,i)=>String.fromCharCode(i))];
+const strings=['','plain ASCII','"quoted"','back\\slash','雪😀\ufeff','\u2028\u2029','雪😀"\\\n'.repeat(4096),...Array.from({length:128},(_,i)=>String.fromCharCode(i))];
 for(const string of strings){
  const text=JSON.stringify(string),value=parseJson(text);
  assert.equal(value.payload.Err.Err.Err.Ok.item0,string);
@@ -166,6 +166,16 @@ for(const string of strings){
  assert.equal(stringCodec.parse(text),string);
  assert.deepEqual(stringCodec.parseBinary(text),stringCodec.values.encode(string));
  assert.equal(stringCodec.stringifyBinary(stringCodec.values.encode(string)),text);
+}
+// Consume long, fragmented output as bytes as well as text. Preserve exact
+// tokens/member order and the independently calculated portable byte budget.
+for(const text of ['['+Array.from({length:2048},(_,i)=>i%2?'"雪😀\\n"':'-1.2500E+0003').join(',')+']',
+ '{"10":1e10000,"2":-0,"__proto__":{"escaped":"\\u0000雪😀"},"tail":['+'true,'.repeat(2047)+'null]}']){
+ const value=parseJson(text),expected=text,bytes=values.encode(value).length;
+ const rendered=json.stringify(value,{bytes});assert.equal(rendered,expected);
+ assert.deepEqual(new TextEncoder().encode(rendered),new TextEncoder().encode(expected));
+ assert.throws(()=>json.stringify(value,{bytes:bytes-1}));
+ assert.deepEqual(values.decode(values.encode(value)),value);
 }
 for(let code=0;code<32;code++)for(const text of ['"'+String.fromCharCode(code)+'"','{"a'+String.fromCharCode(code)+'":0}']){
  assert.throws(()=>parseJson(text),SyntaxError);assert.throws(()=>json.parse(text),SyntaxError);assert.throws(()=>json.parseBinary(text),SyntaxError);
