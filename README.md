@@ -57,9 +57,15 @@ non-finite f32 is binary-only. JavaScript sources expose equivalent codecs, a
 bounded byte visitor and `JsonCodec.validateBinary` without a document tree.
 JavaScript `ValueCodec.validateValue(value, limits)` checks logical values and
 their encoded byte/node/depth budgets without allocating an encoded buffer.
-`encode` writes framed values forward into one growing buffer. JSON text
+Immutable schema edges are resolved once, and single-child validation uses an
+iterative traversal. `encode` writes framed values forward into one growing buffer. JSON text
 conversion uses logical validation or direct binary emission as appropriate;
 neither path constructs and discards a second encoded document.
+`JsonCodec` fuses the same encoded byte/node/depth accounting into text parsing
+and rendering after checking the complete recursive JSON schema.
+`ValueCodec.visitSpans(bytes, visitor, limits, names)` supplies validated node body
+offsets without allocating a byte view per callback. The optional nominal-name
+filter suppresses callbacks only; all nodes still undergo structural validation.
 Untrusted descriptors use async `createValueCodec`; the synchronous constructor
 consumes trusted compiler metadata. Keep transport, codec checking and mathematical
 rewrite authority separate. See the distribution's `docs/json-and-portable-values.md`

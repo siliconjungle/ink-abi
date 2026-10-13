@@ -4,6 +4,18 @@ use ink_abi::{
 };
 use serde_json::json;
 use std::collections::BTreeMap;
+
+#[test]
+fn javascript_logical_validation_preserves_scalar_structure_and_resource_bounds() {
+    let dir = std::env::temp_dir().join(format!("ink-logical-values-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("value-wire.mjs"), ink_abi::VALUE_WIRE_JS_SOURCE).unwrap();
+    std::fs::write(dir.join("json-value.mjs"), ink_abi::JSON_VALUE_JS_SOURCE).unwrap();
+    std::fs::write(dir.join("run.mjs"), include_str!("fixtures/logical-values.mjs")).unwrap();
+    let output = std::process::Command::new("node").arg(dir.join("run.mjs")).output().unwrap();
+    std::fs::remove_dir_all(dir).unwrap();
+    assert!(output.status.success(), "{}", String::from_utf8_lossy(&output.stderr));
+}
 #[test]
 fn exact_typed_json_and_binary_round_trips() {
     let l = Limits::default();
