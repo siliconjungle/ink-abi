@@ -637,3 +637,30 @@ export class CompactValueCodec{
  decode(bytes,options={}){return this.#scan(bytes,options,true);}
  validate(bytes,options={}){this.#scan(bytes,options,false);return true;}
 }
+
+// Compiler materialisers consume already validated bytes synchronously. This
+// factory is for trusted emitted code, not untrusted descriptor/callback data.
+// The complete generic validator runs before any compiler reader is invoked.
+class ValidatedValueReader{
+ constructor(bytes,compact){this.bytes=bytes;this.view=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);this.cursor=compact?1:40;this.compact=compact;}
+ frame(){if(this.compact)return 0;const end=this.cursor+4+this.view.getUint32(this.cursor,true);this.cursor+=4;return end;}
+ finish(end){if(!this.compact&&this.cursor!==end)throw Error('compiled reader frame mismatch');}
+ byte(){return this.bytes[this.cursor++];}
+ word(){const n=this.view.getUint32(this.cursor,true);this.cursor+=4;return n;}
+ signed(){const n=this.view.getInt32(this.cursor,true);this.cursor+=4;return n;}
+ wide(){const n=this.view.getBigUint64(this.cursor,true);this.cursor+=8;return n;}
+ count(){if(!this.compact)return this.word();let n=0,scale=1,byte;do{byte=this.byte();n+=(byte&127)*scale;scale*=128;}while(byte>=128);return n;}
+ text(end){const n=this.compact?this.count():end-this.cursor,start=this.cursor;this.cursor+=n;return wireDecodeText(this.bytes,start,this.cursor);}
+}
+class CompiledCompactValueCodec extends CompactValueCodec{
+ #read;
+ constructor(source,read){super(source);this.#read=read;}
+ decode(bytes,options={}){super.validate(bytes,options);const reader=new ValidatedValueReader(bytes,true),value=this.#read(reader);if(reader.cursor!==bytes.length)throw Error('compiled reader trailing bytes');return value;}
+}
+class CompiledValueCodec extends ValueCodec{
+ #read;#compiledCompact=null;
+ constructor(descriptor,read){super(descriptor);this.#read=read;}
+ decode(bytes,options={}){super.validate(bytes,options);const reader=new ValidatedValueReader(bytes,false),value=this.#read(reader);if(reader.cursor!==bytes.length)throw Error('compiled reader trailing bytes');return value;}
+ compact(){return this.#compiledCompact??=new CompiledCompactValueCodec(this,this.#read);}
+}
+export function createCompiledValueCodec(descriptor,read){if(typeof read!=='function')throw Error('compiled value reader required');return new CompiledValueCodec(descriptor,read);}

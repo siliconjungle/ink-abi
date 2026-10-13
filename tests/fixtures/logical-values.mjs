@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {createValueCodec} from './value-wire.mjs';
+import {createValueCodec,createCompiledValueCodec,CompactValueCodec,ValueCodec} from './value-wire.mjs';
 const scalar=k=>({kind:k});
 const node={kind:'record',name:'Node',fields:[{name:'text',type:scalar('string')},{name:'next',type:{kind:'option',element:{kind:'ref',name:'Node'}}}]};
 const types=[...['unit','bool','u32','i32','u64','int','f32','string'].map(scalar),
@@ -22,6 +22,13 @@ const samples=[null,true,false,0,-0,1,-1,4294967295,4294967296,-2147483648,-2147
 const inherited=Object.assign(Object.create({extra:1}),{Ok:1});samples.push(inherited);
 const hidden={Ok:1};Object.defineProperty(hidden,'extra',{value:1});samples.push(hidden);
 const outcome=(run,value,limits)=>{try{run(value,limits);return true;}catch{return false;}};
+const wordSchema=await createValueCodec(scalar('u32'));let materializations=0;
+const compiledWord=createCompiledValueCodec(wordSchema.descriptor,r=>{materializations++;const end=r.frame(),value=r.word();r.finish(end);return value;});
+assert.ok(compiledWord instanceof ValueCodec);assert.ok(compiledWord.compact() instanceof CompactValueCodec);
+for(const format of [compiledWord,compiledWord.compact()]){
+ const bytes=format.encode(4294967295);assert.equal(format.decode(bytes),4294967295);
+ const bad=bytes.slice();bad[0]^=255;const before=materializations;assert.throws(()=>format.decode(bad));assert.throws(()=>format.decode(bytes,{nodes:0}));assert.throws(()=>format.decode(new Uint8Array(new SharedArrayBuffer(bytes.length))));assert.equal(materializations,before);
+}
 const objects=value=>{const out=new Set(),visit=v=>{if(v&&typeof v==='object'&&!out.has(v)){out.add(v);for(const child of Object.values(v))visit(child);}};visit(value);return out;};
 const assertDetached=(input,output)=>{const old=objects(input);for(const object of objects(output))assert.equal(old.has(object),false,'captured container aliases input');};
 // Independent framing oracle: recurse over descriptors through the public

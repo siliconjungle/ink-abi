@@ -79,6 +79,14 @@ consumes trusted compiler metadata. Keep transport, codec checking and mathemati
 rewrite authority separate. See the distribution's `docs/json-and-portable-values.md`
 and run `cargo test --locked`, including cross-language adversarial fixtures.
 
+`createCompiledValueCodec(descriptor, read)` is for trusted emitted materialisers.
+Its portable and compact decoders run the complete generic validator before
+invoking the literal typed reader synchronously. The reader constructs owned
+values with static field names; it is not a validation certificate or a safe API
+for arbitrary callbacks. Untrusted schemas continue to use `createValueCodec`.
+Buffer/header/schema, Unicode, count and resource checks remain independent of
+the generated materialiser, and generic decoding remains a conformance oracle.
+
 ### Agreed-schema JavaScript transport
 
 `valueCodec.compact()` returns a cached `CompactValueCodec` with the exact same
