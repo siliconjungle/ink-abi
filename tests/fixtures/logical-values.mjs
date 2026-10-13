@@ -64,6 +64,7 @@ for(const type of types){
   const compact=codec.compact(),short=compact.encode(value);
   assert.equal(compact,codec.compact());assert.equal(compact.identity,codec.descriptor.identity);
   assert.equal(compact.validate(short),true);assert.deepEqual(compact.decode(short),codec.decode(bytes));
+  for(let i=1;i<short.length;i++){const corrupt=short.slice();corrupt[i]^=255;assert.equal(outcome(()=>compact.decode(corrupt)),outcome(()=>compact.validate(corrupt)),`compact mutation at ${i}`);}
   assert.deepEqual(compact.encode(compact.decode(short)),short);
   const paddedCompact=new Uint8Array(short.length+7);paddedCompact.set(short,7);
   assert.deepEqual(compact.decode(paddedCompact.subarray(7)),codec.decode(bytes));
@@ -180,3 +181,6 @@ for(const encoder of [(await createValueCodec(scalar('string'))),compactString])
 }
 const checkedHeader=await createValueCodec(scalar('u32')),headerBytes=checkedHeader.encode(7);
 for(let i=0;i<40;i++){const corrupt=headerBytes.slice();corrupt[i]^=1;assert.throws(()=>checkedHeader.validate(corrupt));assert.throws(()=>checkedHeader.decode(corrupt));}
+const largeType={kind:'record',name:'Large',fields:['a','b','c','d','__proto__'].map(name=>({name,type:node}))};
+const large=await createValueCodec(largeType,{Node:node}),largeValue=Object.fromEntries(largeType.fields.map(f=>[f.name,{text:f.name,next:{Some:{text:'child',next:{None:null}}}}]));
+for(const codec of [large,large.compact()])assert.deepEqual(codec.decode(codec.encode(largeValue)),largeValue);

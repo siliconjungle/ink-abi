@@ -106,9 +106,12 @@ never retained. Short ASCII text decoding avoids a temporary byte view; other
 text uses the same fatal UTF-8 decoder. Portable headers compare all 40 bytes in
 little-endian word groups, using the decoder's existing DataView.
 
-Portable JavaScript decoding lazily binds operations to the complete descriptor
+Portable and compact JavaScript decoding lazily bind operations to the complete descriptor
 plan on the first materialisation. It uses ordinary closures and a bounded cursor,
 without eval or runtime source generation. Every scalar, tag, frame, count and
 resource bound remains checked. The generic scanner remains the independent
 validation/visitor implementation; malformed-input fixtures compare both paths.
 Encoding-only and validation-only users do not construct decoder operations.
+The compact validator remains independent of the descriptor-bound decoder and
+checks canonical counts even for zero-width Unit collections. Recursive records,
+large records, prototype-named fields and owned bit/value carriers are covered.
