@@ -9,6 +9,10 @@ const wireDefaults={bytes:16777216,nodes:1000000,depth:128};
 const wireDecimal=s=>typeof s==='string'&&/^(0|[1-9][0-9]*|-[1-9][0-9]*)$/.test(s);
 function wireLimits(options){const l={...wireDefaults,...options};for(const k of ['bytes','nodes','depth'])if(!Number.isSafeInteger(l[k])||l[k]<0||l[k]>wireDefaults[k])throw Error('wire hard resource limit');return l;}
 const wireFloat=new DataView(new ArrayBuffer(4));
+function wireDecodeText(bytes,start,end){
+ if(end-start<=16){let text='';for(let i=start;i<end;i++){const byte=bytes[i];if(byte>=128)return wireDecoder.decode(bytes.subarray(start,end));text+=String.fromCharCode(byte);}return text;}
+ return wireDecoder.decode(bytes.subarray(start,end));
+}
 function wireUtf8Length(text){let bytes=0;for(let i=0;i<text.length;i++){const c=text.charCodeAt(i);if(c<128)bytes++;else if(c<2048)bytes+=2;else if(c>=0xd800&&c<=0xdbff){bytes+=4;i++;}else bytes+=3;}return bytes;}
 const wireOwn=(v,k)=>v!==null&&typeof v==='object'&&Object.hasOwn(v,k);
 const wireTagged=(v,k)=>wireOwn(v,k)&&Object.keys(v).length===1;
@@ -159,8 +163,8 @@ function wireCheckValue(root,value,l){
 }
 // A single cursor replaces per-node child closures and {end,value} temporaries.
 // Projection filters limit callback materialisation, never schema validation.
-function wireScanValue(root,bytes,l,materialize,visitor,selected,spans){
- const view=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);let cursor=40,remaining=l.nodes;
+function wireScanValue(root,bytes,view,l,materialize,visitor,selected,spans){
+ let cursor=40,remaining=l.nodes;
  const property={value:null,enumerable:true,writable:true,configurable:true};
  const node=(p,parentEnd,d)=>{
   if(d>l.depth||--remaining<0||cursor+4>parentEnd)throw Error('wire node, depth or length limit');
@@ -173,7 +177,7 @@ function wireScanValue(root,bytes,l,materialize,visitor,selected,spans){
    case 'u64':if(end-start!==8)throw Error('malformed wire scalar');if(materialize)value=view.getBigUint64(start,true);cursor=end;break;
    case 'string':case 'int':case 'id':case 'enum':{
     if(p.kind==='string'&&!materialize){let i=start;while(i<end&&bytes[i]<128)i++;if(i<end)wireDecoder.decode(bytes.subarray(start,end));}
-    else{const text=wireDecoder.decode(bytes.subarray(start,end));if(p.kind==='int'&&!wireDecimal(text)||p.kind==='id'&&!/^[0-9a-f]{32}$/.test(text)||p.kind==='enum'&&!t.variants.includes(text))throw Error('malformed wire text');if(materialize)value=p.kind==='int'?{Int:text}:text;}
+    else{const text=wireDecodeText(bytes,start,end);if(p.kind==='int'&&!wireDecimal(text)||p.kind==='id'&&!/^[0-9a-f]{32}$/.test(text)||p.kind==='enum'&&!t.variants.includes(text))throw Error('malformed wire text');if(materialize)value=p.kind==='int'?{Int:text}:text;}
     cursor=end;break;
    }
    case 'list':case 'vector':{
@@ -204,31 +208,40 @@ function wireScanValue(root,bytes,l,materialize,visitor,selected,spans){
 }
 export class ValueCodec{
  #hash;
+ #header;
+ #headerWords;
  #descriptor;
  #valuePlan;
  #compactCodec;
+ #encoder;
  get descriptor(){return this.#descriptor;}
  constructor(descriptor){
   // This synchronous path is for compiler-generated immutable metadata. For
   // untrusted descriptors use createValueCodec and compare the computed identity.
   if(descriptor?.format!==valueWireFormat||!/^[0-9a-f]{64}$/.test(descriptor.identity))throw Error('invalid wire schema');
   this.#descriptor=structuredClone(descriptor);this.#hash=Uint8Array.from(descriptor.identity.match(/../g),s=>parseInt(s,16));
+  this.#header=new Uint8Array(40);this.#header.set(wireMagic);this.#header.set(this.#hash,8);
+  const headerView=new DataView(this.#header.buffer);this.#headerWords=Array.from({length:10},(_,i)=>headerView.getUint32(i*4,true));
   const freeze=v=>{if(v&&typeof v==='object'){Object.values(v).forEach(freeze);Object.freeze(v);}};freeze(this.descriptor);this.#valuePlan=wireValuePlan(this);
  }
  resolve(t){for(let i=0;i<64;i++){if(t.kind!=='ref')return t;t=this.descriptor.named[t.name];if(!t)throw Error('wire reference');}throw Error('wire reference cycle');}
  validateValue(value,options={}){wireCheckValue(this.#valuePlan,value,wireLimits(options));return true;}
  compact(){return this.#compactCodec??=new CompactValueCodec(this);}
  encode(value,options={}){
-  const l=wireLimits(options),w=new WireEncoder(l);w.bytes(wireMagic);w.bytes(this.#hash);wireEncodeValue(this.#valuePlan,value,l,w);return w.finish();
+  const l=wireLimits(options),w=this.#encoder&&!this.#encoder.active?this.#encoder:new WireEncoder(l);
+  this.#encoder??=w;w.reset(l);
+  try{w.bytes(this.#header);wireEncodeValue(this.#valuePlan,value,l,w);return w.finish();}
+  finally{w.active=false;if(w.capacity>4096&&this.#encoder===w)this.#encoder=undefined;}
  }
  encodeWith(emit,options={}){
   const w=new WireEncoder(options);w.bytes(wireMagic);w.bytes(this.#hash);emit(w);const bytes=w.finish();this.validate(bytes,options);return bytes;
  }
  scan(bytes,options={},materialize=false,visitor=null,names=null,spans=false){
   const l=wireLimits(options);if(!(bytes instanceof Uint8Array)||typeof SharedArrayBuffer==='function'&&bytes.buffer instanceof SharedArrayBuffer||bytes.length<44||bytes.length>l.bytes)throw Error('wire byte limit or header');
-  if(wireMagic.some((b,i)=>bytes[i]!==b)||this.#hash.some((b,i)=>bytes[i+8]!==b))throw Error('wire format or schema mismatch');
+  const view=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);
+  for(let i=0;i<10;i++)if(view.getUint32(i*4,true)!==this.#headerWords[i])throw Error('wire format or schema mismatch');
   if(names!==null&&(!Array.isArray(names)||names.length>100000||names.some(n=>typeof n!=='string')))throw Error('wire visitor names');
-  return wireScanValue(this.#valuePlan,bytes,l,materialize,visitor,names===null?null:new Set(names),spans);
+  return wireScanValue(this.#valuePlan,bytes,view,l,materialize,visitor,names===null?null:new Set(names),spans);
  }
  visit(bytes,visitor,options={},names=null){if(typeof visitor!=='function')throw Error('wire visitor required');this.scan(bytes,options,false,visitor,names);}
  visitSpans(bytes,visitor,options={},names=null){if(typeof visitor!=='function')throw Error('wire visitor required');this.scan(bytes,options,false,visitor,names,true);}
@@ -239,7 +252,10 @@ export class ValueCodec{
 // Bounded forward emission avoids building and repeatedly joining child buffers.
 class WireEncoder{
  #data=new Uint8Array(256);#view=new DataView(this.#data.buffer);#at=0;#remaining;#depth=0;#limits;
- constructor(options){this.#limits=wireLimits(options);this.#remaining=this.#limits.nodes;}
+ active=false;
+ constructor(options){this.reset(options);}
+ reset(options){this.#limits=wireLimits(options);this.#remaining=this.#limits.nodes;this.#depth=0;this.#at=0;this.active=true;}
+ get capacity(){return this.#data.length;}
  get position(){return this.#at;}
  beginNode(){const at=this.#at;this.word(0);return at;}
  endNode(at){this.patchWord(at,this.#at-at-4);}
@@ -302,7 +318,7 @@ function compactScanValue(root,bytes,l,materialize){
    case 'string':case 'int':case 'id':case 'enum':{
     const n=count();require(n);const start=cursor;cursor+=n;
     if(p.kind==='string'&&!materialize){let i=start;while(i<cursor&&bytes[i]<128)i++;if(i<cursor)wireDecoder.decode(bytes.subarray(start,cursor));}
-    else{const text=wireDecoder.decode(bytes.subarray(start,cursor));if(p.kind==='int'&&!wireDecimal(text)||p.kind==='id'&&!/^[0-9a-f]{32}$/.test(text)||p.kind==='enum'&&!t.variants.includes(text))throw Error('malformed wire text');if(materialize)value=p.kind==='int'?{Int:text}:text;}
+    else{const text=wireDecodeText(bytes,start,cursor);if(p.kind==='int'&&!wireDecimal(text)||p.kind==='id'&&!/^[0-9a-f]{32}$/.test(text)||p.kind==='enum'&&!t.variants.includes(text))throw Error('malformed wire text');if(materialize)value=p.kind==='int'?{Int:text}:text;}
     return value;
    }
    case 'list':case 'vector':{
@@ -332,11 +348,16 @@ function compactScanValue(root,bytes,l,materialize){
 // The sender/receiver must negotiate this exact identity and format. There is
 // deliberately no claim that the bytes themselves identify their schema.
 export class CompactValueCodec{
- #source;#plan;
+ #source;#plan;#encoder;
  get format(){return compactValueWireFormat;}
  get identity(){return this.#source.descriptor.identity;}
  constructor(valueCodec){if(!(valueCodec instanceof ValueCodec))throw Error('compact codec requires a checked value codec');this.#source=valueCodec;this.#plan=wireValuePlan(valueCodec);}
- encode(value,options={}){const l=wireLimits(options),w=new CompactWireEncoder(l);w.byte(1);wireEncodeValue(this.#plan,value,l,w);return w.finish();}
+ encode(value,options={}){
+  const l=wireLimits(options),w=this.#encoder&&!this.#encoder.active?this.#encoder:new CompactWireEncoder(l);
+  this.#encoder??=w;w.reset(l);
+  try{w.byte(1);wireEncodeValue(this.#plan,value,l,w);return w.finish();}
+  finally{w.active=false;if(w.capacity>4096&&this.#encoder===w)this.#encoder=undefined;}
+ }
  #scan(bytes,options,materialize){
   const l=wireLimits(options);
   if(!(bytes instanceof Uint8Array)||typeof SharedArrayBuffer==='function'&&bytes.buffer instanceof SharedArrayBuffer||bytes.length<1||bytes.length>l.bytes)throw Error('wire byte limit or header');

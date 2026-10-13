@@ -98,3 +98,10 @@ functions, with the same preconditions and results as `callBinary`.
 These operational codecs are trusted implementations validated by adversarial
 fixtures and source/reference comparisons. Tests are not formal codec round-trip
 proofs, and a transport negotiation or measurement grants no rewrite authority.
+
+Encoders reuse at most 4096 bytes of private scratch per codec and discard larger
+workspaces. Every result is a fresh byte buffer. Reentrant getter calls use a
+separate workspace; failed calls release the active workspace. The input value is
+never retained. Short ASCII text decoding avoids a temporary byte view; other
+text uses the same fatal UTF-8 decoder. Portable headers compare all 40 bytes in
+little-endian word groups, using the decoder's existing DataView.

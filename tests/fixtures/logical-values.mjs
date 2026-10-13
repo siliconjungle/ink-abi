@@ -147,3 +147,26 @@ for(const [n,prefix] of [[127,[127]],[128,[128,1]],[16383,[255,127]],[16384,[128
 assert.throws(()=>compactString.decode(new Uint8Array(new SharedArrayBuffer(4))));
 const compactCycle=codec.compact();assert.throws(()=>compactCycle.encode(cycle));
 console.log('compact transport preserves typed values, canonical counts, ownership and resource bounds');
+
+// Scratch reuse must not alias outputs, retain large buffers indefinitely, or
+// let reentrant getters disturb an outer invocation. Failures reset the workspace.
+for(const encoder of [float,float.compact()]){
+ const first=encoder.encode({F32Bits:0x7fc12345}),copy=first.slice();
+ let inner;
+ const reentrant={get F32Bits(){inner=encoder.encode({F32Bits:0x12345678});return 0x80000000;}};
+ const outer=encoder.encode(reentrant);
+ assert.equal(encoder.decode(inner).F32Bits,0x12345678);
+ assert.equal(encoder.decode(outer).F32Bits,0x80000000);
+ assert.deepEqual(first,copy);inner.fill(0);assert.deepEqual(first,copy);
+ assert.throws(()=>encoder.encode({get F32Bits(){throw Error('getter failure');}}));
+ assert.throws(()=>encoder.encode({F32Bits:0},{bytes:1}));
+ assert.equal(encoder.decode(encoder.encode({F32Bits:3})).F32Bits,3);
+}
+for(const encoder of [(await createValueCodec(scalar('string'))),compactString]){
+ const big='雪'.repeat(20000),bytes=encoder.encode(big);assert.equal(encoder.decode(bytes),big);
+ const small=encoder.encode('x');assert.equal(encoder.decode(small),'x');
+ assert.equal(encoder.decode(bytes),big);
+ for(let n=0;n<=17;n++)for(const text of ['\u0000\tA~'.repeat(n),'雪'.repeat(n),'\ufeff'.repeat(n)])assert.equal(encoder.decode(encoder.encode(text)),text);
+}
+const checkedHeader=await createValueCodec(scalar('u32')),headerBytes=checkedHeader.encode(7);
+for(let i=0;i<40;i++){const corrupt=headerBytes.slice();corrupt[i]^=1;assert.throws(()=>checkedHeader.validate(corrupt));assert.throws(()=>checkedHeader.decode(corrupt));}
