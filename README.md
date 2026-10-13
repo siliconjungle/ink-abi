@@ -104,6 +104,47 @@ for arbitrary callbacks. Untrusted schemas continue to use `createValueCodec`.
 Buffer/header/schema, Unicode, count and resource checks remain independent of
 the generated materialiser, and generic decoding remains a conformance oracle.
 
+### Plain JavaScript object boundary
+
+`JsonCodec.fromJS(value, limits)` captures a plain JavaScript object tree as the
+existing library `Json` datatype without serializing or parsing JSON text.
+`JsonCodec.toJS(value, options)` returns fresh plain objects and arrays. These
+methods are opt-in JavaScript adapters: native Rust/C/Wasm codecs, source types,
+wire formats, pure calls and state execution are unchanged. Existing paths do
+not invoke the adapters or allocate their traversal state.
+
+Accepted host values are null, booleans, well-formed strings, finite Numbers,
+BigInts, dense plain arrays, and plain objects with `Object.prototype` or null
+prototype in the current realm. Object fields must be enumerable own string-keyed
+data properties. Cycles, sparse/decorated arrays, symbols, accessors, hidden
+properties, undefined, functions and class instances reject rather than being
+silently dropped or coerced. `toJSON` is never invoked. Repeated references are
+copied independently; containers and object identity are not retained. Returned
+objects have ordinary prototypes; even `__proto__` is an own data property.
+Use declared value codecs for typed-array or other schema-specific inputs.
+Callers keep inputs stable. Proxy reflection traps can execute; these adapters
+are data validators, not a sandbox for hostile JavaScript code.
+
+Numbers become their JavaScript decimal spelling, with negative zero preserved.
+BigInts become exact integer tokens; the `Json` type does not retain a separate
+BigInt tag. On return, `numbers: 'number'` is the default and rejects overflow,
+underflow and decimal values that would change on Number reserialization.
+`numbers: 'bigint'` converts every number to an exact integer, rejecting fractions
+and integer magnitudes over 4096 decimal digits. `numbers: 'string'` returns all
+numeric tokens unchanged as strings. Numeric token spelling and JSON member
+order may be lost in ordinary JS objects; retain `Json` or text when those matter.
+
+Both methods enforce existing portable-value byte/node/depth limits and Unicode
+checks, and reject malformed tagged values or duplicate members on return.
+The boundary is explicit:
+
+```js
+const documents = new JsonCodec(valueCodecs.identity.result);
+const document = documents.fromJS({title: 'hello', nested: [true, null]});
+const result = callOwned('mark_received', [document]);
+if (Object.hasOwn(result, 'Ok')) console.log(documents.toJS(result.Ok));
+```
+
 ### Agreed-schema JavaScript transport
 
 `valueCodec.compact()` returns a cached `CompactValueCodec` with the exact same

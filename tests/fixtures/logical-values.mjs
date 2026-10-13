@@ -199,6 +199,67 @@ const branches=[record('Null'),record('Bool',scalar('bool')),record('Number',sca
 let payload=branches[5];for(let i=4;i>=0;i--)payload={kind:'result',ok:branches[i],error:payload};
 const jsonType={kind:'record',name:'Json',fields:[{name:'payload',type:payload}]};
 const values=await createValueCodec(jsonType,{Json:jsonType}),json=new JsonCodec(values);
+// Host adapters are optional boundary operations, not a change to JSON meaning.
+const hostSamples=[null,true,false,0,1,-2,0.1,1e100,Number.MIN_VALUE,'\ufeff雪😀',[],{},
+ {title:'hello',unknown:{nested:[true,null,3.5]}},Object.assign(Object.create(null),{x:1}),
+ {['__proto__']:{safe:true},constructor:'data',toString:'data'}];
+for(const host of hostSamples){
+ const logical=json.fromJS(host),oracle=json.parse(JSON.stringify(host)),expected=JSON.parse(JSON.stringify(host));
+ assert.deepEqual(logical,oracle);assert.deepEqual(json.toJS(logical),expected);
+ assertDetached(host,logical);assertDetached(logical,json.toJS(logical));
+ for(const format of [values,values.compact()])assert.deepEqual(json.toJS(format.decode(format.encode(logical))),expected);
+ const bytes=values.encode(logical).length;
+ for(const limits of [{bytes},{bytes:bytes-1},{nodes:0},{nodes:1},{nodes:4},{nodes:16},{depth:0},{depth:7},{depth:16}]){
+  const expected=outcome(()=>values.validateValue(oracle,limits));
+  assert.equal(outcome(()=>json.fromJS(host,limits)),expected,JSON.stringify(limits));
+  assert.equal(outcome(()=>json.toJS(logical,limits)),expected,JSON.stringify(limits));
+ }
+}
+assert(Object.is(json.toJS(json.fromJS(-0)),-0));
+assert.equal(json.stringify(json.fromJS(-0)),'-0');
+const big=123456789012345678901234567890n;
+assert.equal(json.stringify(json.fromJS({value:big})),'{"value":'+big+'}');
+assert.deepEqual(json.toJS(json.fromJS({value:big}),{numbers:'bigint'}),{value:big});
+assert.deepEqual(json.toJS(json.parse('[1.00,-2e3,0]'),{numbers:'bigint'}),[1n,-2000n,0n]);
+for(const token of ['9007199254740993','1e10000','1e-10000','1.00000000000000001']){
+ const logical=json.parse(token);assert.throws(()=>json.toJS(logical));
+ assert.equal(json.toJS(logical,{numbers:'string'}),token);
+}
+for(const token of ['1.00','1.2300e2','1e100','1000e-3','0e9999999999999999999999'])assert.equal(json.toJS(json.parse(token)),Number(token));
+assert.throws(()=>json.toJS(json.parse('1.5'),{numbers:'bigint'}));
+assert.throws(()=>json.toJS(json.parse('1'),{numbers:'guess'}));
+const shared={x:[1,2]},sharedHost={left:shared,right:shared};
+const detached=json.toJS(json.fromJS(sharedHost));assertDetached(sharedHost,detached);
+assert.notEqual(detached.left,detached.right);assert.notEqual(detached.left.x,detached.right.x);
+shared.x[0]=99;assert.equal(detached.left.x[0],1);
+const jsCycle={};jsCycle.self=jsCycle;const arrayCycle=[];arrayCycle.push(arrayCycle);
+const accessor={get value(){throw Error('getter must not execute');}};
+let invoked=false;const hook={toJSON(){invoked=true;return {};}};
+for(const host of [undefined,()=>{},Symbol('x'),NaN,Infinity,-Infinity,new Date(),new Map(),new Set(),
+ new Uint8Array([1]),new Number(1),new (class Record{constructor(){this.x=1;}})(),
+ {x:undefined},{[Symbol('x')]:1},{x:'\ud800'},Object.defineProperty({},'x',{value:1}),
+ Object.assign([1],{extra:2}),[1,,3],jsCycle,arrayCycle,hook])assert.throws(()=>json.fromJS(host));
+assert.throws(()=>json.fromJS(accessor),/own data property/);assert.equal(invoked,false);
+const arrayGetter=[0];Object.defineProperty(arrayGetter,'0',{get(){invoked=true;return 0;}});
+assert.throws(()=>json.fromJS(arrayGetter),/own data property/);assert.equal(invoked,false);
+const protoInput=JSON.parse('{"__proto__":{"polluted":true}}');
+const protoOutput=json.toJS(json.fromJS(protoInput));assert.equal(Object.getPrototypeOf(protoOutput),Object.prototype);
+assert(Object.hasOwn(protoOutput,'__proto__'));assert.equal({}.polluted,undefined);
+for(const logical of [null,{}, {payload:null}, {payload:{Ok:{item0:1}}}])assert.throws(()=>json.toJS(logical));
+const duplicate=json.parse('{"x":0}');duplicate.payload.Err.Err.Err.Err.Err.item0.push({key:'x',value:json.parse('1')});
+assert.throws(()=>json.toJS(duplicate),/duplicate/);
+const malformed=json.parse('1');malformed.payload.Err.Err.Ok.item0='01';assert.throws(()=>json.toJS(malformed));
+const logicalCycle=json.parse('[]');logicalCycle.payload.Err.Err.Err.Err.Ok.item0.push(logicalCycle);assert.throws(()=>json.toJS(logicalCycle),/cyclic/);
+const logicalGetter=json.parse('true');Object.defineProperty(logicalGetter,'payload',{get(){invoked=true;return {};}});
+assert.throws(()=>json.toJS(logicalGetter),/own data property/);assert.equal(invoked,false);
+for(const limits of [{bytes:0},{nodes:-1},{depth:129},{nodes:NaN}]){
+ assert.throws(()=>json.fromJS(null,limits));assert.throws(()=>json.toJS(json.parse('null'),limits));
+}
+// Deterministic trees exercise the adapters against the independent text path.
+let seed=731;const next=()=>seed=(Math.imul(seed,1664525)+1013904223)>>>0;
+const hostTree=depth=>{const n=next();if(!depth)return [null,!!(n&1),n/8,'v'+n][n%4];if(n%2)return Array.from({length:n%4},()=>hostTree(depth-1));return Object.fromEntries(Array.from({length:n%5},(_,i)=>['k'+i,hostTree(depth-1)]));};
+for(let i=0;i<128;i++){const host=hostTree(3);assert.deepEqual(json.fromJS(host),json.parse(JSON.stringify(host)));assert.deepEqual(json.toJS(json.fromJS(host)),host);}
+console.log('JavaScript object adapters preserve detached data, exact number policies and existing wire budgets');
 const texts=['null','true','false','0','-0','1e10000','"\\ufeff雪😀"','[]','{}','[null,false,0,"x"]','{"a":1,"unknown":{"nested":[true,1e10000]}}','[{"x":[false,null]}]'];
 for(const text of texts){
  const value=parseJson(text),bytes=values.encode(value).length,limits=[{},...[0,1,2,3,4,6,7,8,9,15,32].map(nodes=>({nodes})),...[0,1,2,4,7,8,10,16,128].map(depth=>({depth})),...[0,40,44,bytes-1,bytes,bytes+1].map(bytes=>({bytes}))];
