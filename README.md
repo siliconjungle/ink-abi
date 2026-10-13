@@ -84,6 +84,10 @@ auxiliary resources. Compact decoding needs a `DataView` only for fixed numeric
 lanes; records wider than four fields need a reusable property descriptor.
 These flags stay in private codec state and do not mutate the shared plan shape.
 All byte, node, depth, tag and Unicode checks remain active.
+Single-field record decoders bind the child's reader directly while retaining
+both node/depth charges and, for portable values, both frame-end checks in their
+original order. Read operations and checked node entrypoints remain separate
+internal mechanisms; this does not grant source rewrite authority.
 `ValueCodec.visitSpans(bytes, visitor, limits, names)` supplies validated node body
 offsets without allocating a byte view per callback. The optional nominal-name
 filter suppresses callbacks only; all nodes still undergo structural validation.

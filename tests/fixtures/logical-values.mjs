@@ -22,6 +22,21 @@ const samples=[null,true,false,0,-0,1,-1,4294967295,4294967296,-2147483648,-2147
 const inherited=Object.assign(Object.create({extra:1}),{Ok:1});samples.push(inherited);
 const hidden={Ok:1};Object.defineProperty(hidden,'extra',{value:1});samples.push(hidden);
 const outcome=(run,value,limits)=>{try{run(value,limits);return true;}catch{return false;}};
+// Every supported child shape can sit directly inside a single-field record.
+// Compare fused decoding with independent framing/scanning and reduced budgets.
+for(const [index,type]of types.entries()){
+ const wrapper=await createValueCodec({kind:'record',name:'Wrapper'+index,fields:[{name:'__proto__',type}]},{Node:node});
+ for(const sample of samples){
+  const value={['__proto__']:sample};if(!outcome(()=>wrapper.encode(value)))continue;
+  const bytes=wrapper.encode(value);assert.deepEqual(wrapper.decode(bytes),wrapper.scan(bytes,{},true,()=>{}));
+  const compact=wrapper.compact(),short=compact.encode(value);assert.deepEqual(compact.decode(short),wrapper.decode(bytes));
+  for(const limits of [{nodes:0},{nodes:1},{nodes:2},{nodes:3},{depth:0},{depth:1},{depth:2}]){
+   assert.equal(outcome(()=>wrapper.decode(bytes,limits)),outcome(()=>wrapper.scan(bytes,limits,true,()=>{})));
+   assert.equal(outcome(()=>compact.decode(short,limits)),outcome(()=>compact.validate(short,limits)));
+  }
+  for(let i=40;i<bytes.length;i++){const corrupt=bytes.slice();corrupt[i]^=255;assert.equal(outcome(()=>wrapper.decode(corrupt)),outcome(()=>wrapper.scan(corrupt,{},true,()=>{})));}
+ }
+}
 const wordSchema=await createValueCodec(scalar('u32'));let materializations=0;
 const hardLimits={bytes:16777216,nodes:1000000,depth:128};
 for(const format of [wordSchema,wordSchema.compact()]){

@@ -62,7 +62,7 @@ function wireBindDecodePlan(root,compact=false){
 // Select literal descriptor operations once, without runtime source generation
 // or eval. Recursive edges call the completed plan. The generic scanner remains
 // the visitor/validation path and an independent materialisation implementation.
-function wireDecodeOperation(p){
+function wireReadOperation(p){
  const t=p.type;
  let read;
  switch(p.kind){
@@ -99,6 +99,14 @@ function wireDecodeOperation(p){
   case 'result':read=(r,end,d)=>r.tag(end)?{Err:p.error.decode(r,end,d+1)}:{Ok:p.ok.decode(r,end,d+1)};break;
   default:read=()=>{throw Error('unsupported wire kind');};
  }
+ return read;
+}
+function wireDecodeOperation(p){
+ if(p.kind==='record'&&p.fields.length===1){
+  const field=p.fields[0],read=wireReadOperation(field.plan),name=field.name;
+  return (r,parentEnd,d)=>{const end=r.enter(parentEnd,d),childEnd=r.enter(end,d+1),item=read(r,childEnd,d+1);if(r.cursor!==childEnd)throw Error('trailing wire frame bytes');const value={[name]:item};if(r.cursor!==end)throw Error('trailing wire frame bytes');return value;};
+ }
+ const read=wireReadOperation(p);
  return (r,parentEnd,d)=>{const end=r.enter(parentEnd,d),value=read(r,end,d);if(r.cursor!==end)throw Error('trailing wire frame bytes');return value;};
 }
 class WireDecodeCursor{
@@ -172,7 +180,7 @@ class WireScanCursor{
  tag(end){if(this.cursor===end||this.bytes[this.cursor]>1)throw Error('wire sum tag');return this.bytes[this.cursor++];}
  text(end){const text=wireDecodeText(this.bytes,this.cursor,end);this.cursor=end;return text;}
 }
-function compactDecodeOperation(p){
+function compactReadOperation(p){
  const t=p.type;let read;
  switch(p.kind){
   case 'unit':read=()=>null;break;
@@ -200,6 +208,14 @@ function compactDecodeOperation(p){
   case 'result':read=(r,d)=>r.tag()?{Err:p.error.decodeCompact(r,d+1)}:{Ok:p.ok.decodeCompact(r,d+1)};break;
   default:read=()=>{throw Error('unsupported wire kind');};
  }
+ return read;
+}
+function compactDecodeOperation(p){
+ if(p.kind==='record'&&p.fields.length===1){
+  const field=p.fields[0],read=compactReadOperation(field.plan),name=field.name;
+  return (r,d)=>{if(d>r.depth||--r.remaining<0)throw Error('wire node or depth limit');if(d+1>r.depth||--r.remaining<0)throw Error('wire node or depth limit');return {[name]:read(r,d+1)};};
+ }
+ const read=compactReadOperation(p);
  return (r,d)=>{if(d>r.depth||--r.remaining<0)throw Error('wire node or depth limit');return read(r,d);};
 }
 class CompactDecodeCursor{
