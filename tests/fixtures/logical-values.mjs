@@ -145,8 +145,33 @@ for(const count of [0,1,2,3,4,5,8]){
  const fields=Array.from({length:count},(_,i)=>({name:i===0?'__proto__':'f'+i,type:{kind:'list',element:scalar('string')}})),record=await createValueCodec({kind:'record',name:'Owned'+count,fields});
  const input=Object.fromEntries(fields.map(f=>[f.name,['雪','\ufeff','😀']])),captured=record.capture(input);
  assert.deepEqual(captured,record.decode(record.encode(input)));assertDetached(input,captured);assert.equal(Object.getPrototypeOf(captured),Object.prototype);
+ const compact=record.compact(),bytes=compact.encode(input);assert.deepEqual(compact.decode(bytes),captured);
+ for(let i=0;i<bytes.length;i++){const corrupt=bytes.slice();corrupt[i]^=255;assert.equal(outcome(()=>compact.decode(corrupt)),outcome(()=>compact.validate(corrupt)),`record ${count}, byte ${i}`);}
  for(const f of fields){assert.equal(Object.hasOwn(captured,f.name),true);captured[f.name][0]='changed';assert.equal(input[f.name][0],'雪');}
 }
+// Recursive descriptor reachability must reserve numeric views and wide-record
+// descriptors even when the selected value takes the other result branch.
+const mixedRef={kind:'ref',name:'Mixed'},wide={kind:'record',name:'Wide',fields:[
+ {name:'__proto__',type:scalar('string')},{name:'bits',type:scalar('f32')},{name:'wide',type:scalar('u64')},
+ {name:'items',type:{kind:'list',element:scalar('u32')}},{name:'text',type:scalar('string')},{name:'next',type:{kind:'option',element:mixedRef}}]};
+const mixed={kind:'record',name:'Mixed',fields:[{name:'branch',type:{kind:'result',ok:scalar('unit'),error:wide}}]};
+const mixedCodec=await createValueCodec(mixed,{Mixed:mixed});
+const mixedValues=[{branch:{Ok:null}},{branch:{Err:{['__proto__']:'own',bits:{F32Bits:0x7fc12345},wide:18446744073709551615n,items:[0,4294967295],text:'雪😀',next:{Some:{branch:{Ok:null}}}}}}];
+for(const format of [mixedCodec,mixedCodec.compact()])for(const value of mixedValues){
+ const bytes=format.encode(value);assert.deepEqual(format.decode(bytes),value);
+ for(let i=0;i<bytes.length;i++){const corrupt=bytes.slice();corrupt[i]^=255;assert.equal(outcome(()=>format.decode(corrupt)),outcome(()=>format.validate(corrupt)),`mixed byte ${i}`);}
+ for(const limits of [{nodes:1},{depth:1},{bytes:bytes.length-1}])assert.equal(outcome(()=>format.decode(bytes,limits)),outcome(()=>format.validate(bytes,limits)));
+}
+// The no-numeric recursive graph needs no compact DataView; numeric graphs
+// require one regardless of the branch selected by this particular value.
+const textCodec=await createValueCodec(node,{Node:node}),textCompact=textCodec.compact(),textValue={text:'snow',next:{Some:{text:'雪😀',next:{None:null}}}};
+const textBytes=textCompact.encode(textValue),mixedCompact=mixedCodec.compact(),mixedBytes=mixedCompact.encode(mixedValues[0]);
+const OriginalDataView=globalThis.DataView;let views=0;
+globalThis.DataView=class extends OriginalDataView{constructor(...args){super(...args);views++;}};
+try{
+ assert.deepEqual(textCompact.decode(textBytes),textValue);assert.equal(views,0);
+ assert.deepEqual(mixedCompact.decode(mixedBytes),mixedValues[0]);assert.equal(views,1);
+}finally{globalThis.DataView=OriginalDataView;}
 Object.defineProperty(Object.prototype,'F32Bits',{set(){throw Error('prototype setter called');},configurable:true});
 try{assert.deepEqual(float.capture(0),{F32Bits:0});}finally{delete Object.prototype.F32Bits;}
 

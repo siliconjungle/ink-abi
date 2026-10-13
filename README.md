@@ -79,6 +79,11 @@ Value codecs reuse private immutable default resource policies. Each invocation
 retains independent counters; arbitrary supplied limits are still normalized and
 checked. Encoders copy byte/depth limits into their per-invocation scalar state,
 including when an encoder is reused after failure or entered recursively.
+Decoder binding traverses the complete recursive descriptor graph to reserve
+auxiliary resources. Compact decoding needs a `DataView` only for fixed numeric
+lanes; records wider than four fields need a reusable property descriptor.
+These flags stay in private codec state and do not mutate the shared plan shape.
+All byte, node, depth, tag and Unicode checks remain active.
 `ValueCodec.visitSpans(bytes, visitor, limits, names)` supplies validated node body
 offsets without allocating a byte view per callback. The optional nominal-name
 filter suppresses callbacks only; all nodes still undergo structural validation.

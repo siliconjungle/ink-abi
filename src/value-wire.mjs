@@ -48,14 +48,16 @@ function wireValuePlan(codec){
  };return build(codec.descriptor.root);
 }
 function wireBindDecodePlan(root,compact=false){
- const seen=new Set(),pending=[root];
+ const seen=new Set(),pending=[root];let flags=0;
  while(pending.length){
   const p=pending.pop();if(seen.has(p))continue;seen.add(p);if(compact)p.decodeCompact=compactDecodeOperation(p);else p.decode=wireDecodeOperation(p);
+  if(p.fields?.length>4)flags|=1;
+  if(p.kind==='u32'||p.kind==='i32'||p.kind==='u64'||p.kind==='f32')flags|=2;
   if(p.fields)for(const f of p.fields)pending.push(f.plan);
   if(p.element)pending.push(p.element);
   if(p.ok){pending.push(p.ok);pending.push(p.error);}
  }
- return true;
+ return flags|4;
 }
 // Select literal descriptor operations once, without runtime source generation
 // or eval. Recursive edges call the completed plan. The generic scanner remains
@@ -100,7 +102,7 @@ function wireDecodeOperation(p){
  return (r,parentEnd,d)=>{const end=r.enter(parentEnd,d),value=read(r,end,d);if(r.cursor!==end)throw Error('trailing wire frame bytes');return value;};
 }
 class WireDecodeCursor{
- constructor(bytes,view,limits){this.bytes=bytes;this.view=view;this.cursor=40;this.remaining=limits.nodes;this.depth=limits.depth;this.property={value:null,enumerable:true,writable:true,configurable:true};}
+ constructor(bytes,view,limits){this.bytes=bytes;this.view=view;this.cursor=40;this.remaining=limits.nodes;this.depth=limits.depth;this.property=null;}
  enter(parentEnd,d){
   if(d>this.depth||--this.remaining<0||this.cursor+4>parentEnd)throw Error('wire node, depth or length limit');
   const start=this.cursor+4,end=start+this.view.getUint32(this.cursor,true);if(end>parentEnd)throw Error('truncated wire frame');this.cursor=start;return end;
@@ -201,7 +203,7 @@ function compactDecodeOperation(p){
  return (r,d)=>{if(d>r.depth||--r.remaining<0)throw Error('wire node or depth limit');return read(r,d);};
 }
 class CompactDecodeCursor{
- constructor(bytes,limits){this.bytes=bytes;this.view=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);this.cursor=1;this.remaining=limits.nodes;this.depth=limits.depth;this.property={value:null,enumerable:true,writable:true,configurable:true};}
+ constructor(bytes,limits,flags){this.bytes=bytes;this.view=flags&2?new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength):null;this.cursor=1;this.remaining=limits.nodes;this.depth=limits.depth;this.property=null;}
  require(n){if(n>this.bytes.length-this.cursor)throw Error('truncated compact value');}
  count(){
   if(this.cursor>=this.bytes.length)throw Error('truncated compact value');
@@ -467,7 +469,7 @@ export class ValueCodec{
  #valuePlan;
  #compactCodec;
  #encoder;
- #decodeBound=false;
+ #decodeBound=0;
  #scanPlan=null;
  #capturePlan=null;
  #copyPlan=null;
@@ -500,7 +502,7 @@ export class ValueCodec{
   const view=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);
   for(let i=0;i<10;i++)if(view.getUint32(i*4,true)!==this.#headerWords[i])throw Error('wire format or schema mismatch');
   if(names!==null&&(!Array.isArray(names)||names.length>100000||names.some(n=>typeof n!=='string')))throw Error('wire visitor names');
-  if(materialize&&!visitor){this.#decodeBound||=wireBindDecodePlan(this.#valuePlan);const cursor=new WireDecodeCursor(bytes,view,l),value=this.#valuePlan.decode(cursor,bytes.length,0);if(cursor.cursor!==bytes.length)throw Error('trailing wire bytes');return value;}
+  if(materialize&&!visitor){this.#decodeBound||=wireBindDecodePlan(this.#valuePlan);const cursor=new WireDecodeCursor(bytes,view,l);if(this.#decodeBound&1)cursor.property={value:null,enumerable:true,writable:true,configurable:true};const value=this.#valuePlan.decode(cursor,bytes.length,0);if(cursor.cursor!==bytes.length)throw Error('trailing wire bytes');return value;}
   if(!materialize){this.#scanPlan??=wireScanPlan(this.#valuePlan);const cursor=new WireScanCursor(bytes,view,l,visitor,names===null?null:new Set(names),spans),value=this.#scanPlan.scan(cursor,bytes.length,0);if(cursor.cursor!==bytes.length)throw Error('trailing wire bytes');return value;}
   return wireScanValue(this.#valuePlan,bytes,view,l,materialize,visitor,names===null?null:new Set(names),spans);
  }
@@ -617,7 +619,7 @@ function compactScanValue(root,bytes,l,materialize){
 // The sender/receiver must negotiate this exact identity and format. There is
 // deliberately no claim that the bytes themselves identify their schema.
 export class CompactValueCodec{
- #source;#plan;#encoder;#decodeBound=false;
+ #source;#plan;#encoder;#decodeBound=0;
  get format(){return compactValueWireFormat;}
  get identity(){return this.#source.descriptor.identity;}
  constructor(valueCodec){if(!(valueCodec instanceof ValueCodec))throw Error('compact codec requires a checked value codec');this.#source=valueCodec;this.#plan=wireValuePlan(valueCodec);}
@@ -631,7 +633,7 @@ export class CompactValueCodec{
   const l=wireLimits(options);
   if(!(bytes instanceof Uint8Array)||typeof SharedArrayBuffer==='function'&&bytes.buffer instanceof SharedArrayBuffer||bytes.length<1||bytes.length>l.bytes)throw Error('wire byte limit or header');
   if(bytes[0]!==1)throw Error('compact format mismatch');
-  if(materialize){this.#decodeBound||=wireBindDecodePlan(this.#plan,true);const cursor=new CompactDecodeCursor(bytes,l),value=this.#plan.decodeCompact(cursor,0);if(cursor.cursor!==bytes.length)throw Error('trailing compact bytes');return value;}
+  if(materialize){this.#decodeBound||=wireBindDecodePlan(this.#plan,true);const cursor=new CompactDecodeCursor(bytes,l,this.#decodeBound);if(this.#decodeBound&1)cursor.property={value:null,enumerable:true,writable:true,configurable:true};const value=this.#plan.decodeCompact(cursor,0);if(cursor.cursor!==bytes.length)throw Error('trailing compact bytes');return value;}
   return compactScanValue(this.#plan,bytes,l,materialize);
  }
  decode(bytes,options=wireDefaultOptions){return this.#scan(bytes,options,true);}
