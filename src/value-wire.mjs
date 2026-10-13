@@ -142,8 +142,13 @@ function compactDecodeOperation(p){
 class CompactDecodeCursor{
  constructor(bytes,limits){this.bytes=bytes;this.view=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);this.cursor=1;this.remaining=limits.nodes;this.depth=limits.depth;this.property={value:null,enumerable:true,writable:true,configurable:true};}
  require(n){if(n>this.bytes.length-this.cursor)throw Error('truncated compact value');}
- count(){let value=0,scale=1;for(let i=0;i<5;i++){this.require(1);const byte=this.bytes[this.cursor++];if(i===4&&byte>15)throw Error('compact count overflow');value+=(byte&127)*scale;if(byte<128){if(i>0&&byte===0)throw Error('noncanonical compact count');return value;}scale*=128;}throw Error('compact count overflow');}
- tag(){this.require(1);const tag=this.bytes[this.cursor++];if(tag>1)throw Error('wire sum tag');return tag;}
+ count(){
+  if(this.cursor>=this.bytes.length)throw Error('truncated compact value');
+  const first=this.bytes[this.cursor++];if(first<128)return first;
+  let value=first&127,scale=128;
+  for(let i=1;i<5;i++){if(this.cursor>=this.bytes.length)throw Error('truncated compact value');const byte=this.bytes[this.cursor++];if(i===4&&byte>15)throw Error('compact count overflow');value+=(byte&127)*scale;if(byte<128){if(byte===0)throw Error('noncanonical compact count');return value;}scale*=128;}throw Error('compact count overflow');
+ }
+ tag(){if(this.cursor>=this.bytes.length)throw Error('truncated compact value');const tag=this.bytes[this.cursor++];if(tag>1)throw Error('wire sum tag');return tag;}
  text(){const n=this.count();this.require(n);const start=this.cursor;this.cursor+=n;return wireDecodeText(this.bytes,start,this.cursor);}
 }
 function wireInvalidValue(){throw Error('invalid value for wire schema');}
