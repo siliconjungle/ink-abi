@@ -53,6 +53,13 @@ for(const type of types){
   if(!outcome(v=>codec.encode(v),value,{}))continue;
   const bytes=codec.encode(value);
   assert.equal(codec.validate(bytes),true);assert.deepEqual(codec.encode(codec.decode(bytes)),bytes);
+  assert.deepEqual(codec.decode(bytes),codec.scan(bytes,{},true,()=>{}));
+  // The descriptor-bound decoder and independent generic scanner must agree
+  // on malformed frames/tags/text as well as successful values and budgets.
+  for(let i=40;i<bytes.length;i++){
+   const corrupt=bytes.slice();corrupt[i]^=255;
+   assert.equal(outcome(()=>codec.decode(corrupt)),outcome(()=>codec.scan(corrupt,{},true,()=>{})),`mutation at ${i}`);
+  }
   assert.deepEqual(referenceBytes(codec,codec.decode(bytes)),bytes);
   const compact=codec.compact(),short=compact.encode(value);
   assert.equal(compact,codec.compact());assert.equal(compact.identity,codec.descriptor.identity);
@@ -71,7 +78,10 @@ for(const type of types){
    assert.equal(outcome(()=>compact.decode(short,l)),accepted);
   }
   for(const limits of [{bytes:bytes.length},{bytes:bytes.length-1},{nodes:0},{nodes:1},{nodes:2},{nodes:4},{depth:0},{depth:1},{depth:3},{depth:6}])
+  {
    assert.equal(outcome((v,l)=>codec.validateValue(v,l),value,limits),outcome((v,l)=>codec.encode(v,l),value,limits),JSON.stringify(limits));
+   assert.equal(outcome(()=>codec.decode(bytes,limits)),outcome(()=>codec.scan(bytes,limits,true,()=>{})));
+  }
  }
 }
 // A recursive cycle must reject through the node/depth limits, never loop forever.
