@@ -269,7 +269,15 @@ class WireEncoder{
  byte(n){if(!Number.isInteger(n)||n<0||n>255)throw Error('wire byte range');this.#reserve(1);this.#data[this.#at++]=n;}
  word(n){if(!Number.isInteger(n)||n<0||n>4294967295)throw Error('wire word range');const end=this.#reserve(4);this.#view.setUint32(this.#at,n,true);this.#at=end;}
  wide(n){if(typeof n!=='bigint'||n<0n||n>18446744073709551615n)throw Error('wire wide range');const end=this.#reserve(8);this.#view.setBigUint64(this.#at,n,true);this.#at=end;}
- text(text){if(typeof text!=='string'||!text.isWellFormed())throw Error('wire Unicode');const size=wireUtf8Length(text),end=this.#reserve(size),r=wireEncoder.encodeInto(text,this.#data.subarray(this.#at,end));if(r.read!==text.length||r.written!==size)throw Error('wire UTF-8 size');this.#at=end;}
+ text(text,count=false){
+  if(typeof text!=='string')throw Error('wire Unicode');
+  if(text.length<=16){
+   let ascii=true;for(let i=0;i<text.length;i++)if(text.charCodeAt(i)>=128){ascii=false;break;}
+   if(ascii){if(count)this.count(text.length);const end=this.#reserve(text.length);for(let i=0;i<text.length;i++)this.#data[this.#at+i]=text.charCodeAt(i);this.#at=end;return;}
+  }
+  if(!text.isWellFormed())throw Error('wire Unicode');const size=wireUtf8Length(text);if(count)this.count(size);
+  const end=this.#reserve(size),r=wireEncoder.encodeInto(text,this.#data.subarray(this.#at,end));if(r.read!==text.length||r.written!==size)throw Error('wire UTF-8 size');this.#at=end;
+ }
  patchWord(at,n){if(!Number.isInteger(at)||at<0||at+4>this.#at||!Number.isInteger(n)||n<0||n>4294967295)throw Error('wire patch offset');this.#view.setUint32(at,n,true);}
  frame(emit){if(this.#depth>this.#limits.depth||--this.#remaining<0)throw Error('wire node or depth limit');const at=this.position;this.word(0);this.#depth++;try{emit(this);}finally{this.#depth--;}this.patchWord(at,this.position-at-4);}
  reorder(start,spans){
@@ -289,7 +297,7 @@ class CompactWireEncoder extends WireEncoder{
   if(!Number.isInteger(n)||n<0||n>4294967295)throw Error('compact count range');
   while(n>=128){this.byte(n%128+128);n=Math.floor(n/128);}this.byte(n);
  }
- text(text){if(typeof text!=='string'||!text.isWellFormed())throw Error('wire Unicode');this.count(wireUtf8Length(text));super.text(text);}
+ text(text){super.text(text,true);}
 }
 
 function compactScanValue(root,bytes,l,materialize){
