@@ -75,6 +75,10 @@ Logical JSON rendering accumulates a bounded string directly. It preserves exact
 numeric tokens, member order, duplicate rejection and Unicode checks; consumers
 may still incur string flattening, so performance evidence includes complete
 UTF-8 output consumption as well as returned text.
+Value codecs reuse private immutable default resource policies. Each invocation
+retains independent counters; arbitrary supplied limits are still normalized and
+checked. Encoders copy byte/depth limits into their per-invocation scalar state,
+including when an encoder is reused after failure or entered recursively.
 `ValueCodec.visitSpans(bytes, visitor, limits, names)` supplies validated node body
 offsets without allocating a byte view per callback. The optional nominal-name
 filter suppresses callbacks only; all nodes still undergo structural validation.

@@ -23,6 +23,23 @@ const inherited=Object.assign(Object.create({extra:1}),{Ok:1});samples.push(inhe
 const hidden={Ok:1};Object.defineProperty(hidden,'extra',{value:1});samples.push(hidden);
 const outcome=(run,value,limits)=>{try{run(value,limits);return true;}catch{return false;}};
 const wordSchema=await createValueCodec(scalar('u32'));let materializations=0;
+const hardLimits={bytes:16777216,nodes:1000000,depth:128};
+for(const format of [wordSchema,wordSchema.compact()]){
+ const bytes=format.encode(7);
+ for(const options of [undefined,null,{},Object.freeze({...hardLimits})]){
+  assert.deepEqual(format.encode(7,options),bytes);assert.equal(format.decode(bytes,options),7);
+  assert.equal(format.validate(bytes,options),true);
+ }
+ for(const options of [{bytes:0},{nodes:0},{depth:-1},{bytes:hardLimits.bytes+1},{nodes:NaN},{depth:129}]){
+  assert.throws(()=>format.encode(7,options));assert.throws(()=>format.decode(bytes,options));assert.throws(()=>format.validate(bytes,options));
+  assert.deepEqual(format.encode(7),bytes);assert.equal(format.decode(bytes),7);
+ }
+ let reads=0;const options={get bytes(){reads++;return bytes.length;}};
+ assert.deepEqual(format.encode(7,options),bytes);assert.equal(reads,1);
+ reads=0;assert.equal(format.decode(bytes,options),7);assert.equal(reads,1);
+ options.nodes=0;assert.throws(()=>format.decode(bytes,options));delete options.nodes;
+ assert.equal(format.decode(bytes,options),7);
+}
 const compiledWord=createCompiledValueCodec(wordSchema.descriptor,r=>{materializations++;const end=r.frame(),value=r.word();r.finish(end);return value;});
 assert.ok(compiledWord instanceof ValueCodec);assert.ok(compiledWord.compact() instanceof CompactValueCodec);
 for(const format of [compiledWord,compiledWord.compact()]){
@@ -117,6 +134,10 @@ const float=await createValueCodec(scalar('f32'));let reads=0;const getter={get 
 reads=0;assert.deepEqual(float.encode(getter),float.encode({F32Bits:0}));assert.equal(reads,1);
 reads=0;assert.deepEqual(float.capture(getter),{F32Bits:0});assert.equal(reads,1);
 const reentrantBits={get F32Bits(){assert.deepEqual(float.capture(0.1),float.decode(float.encode(0.1)));return 0x7f812345;}};
+assert.deepEqual(float.decode(float.encode(reentrantBits)),{F32Bits:0x7f812345});
+const changingLimits={bytes:48};const changingBits={get F32Bits(){changingLimits.bytes=0;assert.deepEqual(float.decode(float.encode(0)),{F32Bits:0});return 0x80000000;}};
+assert.deepEqual(float.decode(float.encode(changingBits,changingLimits)),{F32Bits:0x80000000});
+assert.throws(()=>float.encode(0,changingLimits));assert.deepEqual(float.decode(float.encode(0)),{F32Bits:0});
 assert.deepEqual(float.capture(reentrantBits),{F32Bits:0x7f812345});
 assert.deepEqual(float.copy(reentrantBits),{F32Bits:0x7f812345});
 assert.throws(()=>float.capture({F32Bits:4294967296}));assert.deepEqual(float.capture({F32Bits:0x80000000}),{F32Bits:0x80000000});

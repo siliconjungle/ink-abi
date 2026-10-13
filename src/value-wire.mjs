@@ -5,9 +5,9 @@ export const valueWireFormat='ink-value-wire-v1';
 export const compactValueWireFormat='ink-value-session-v1';
 const wireMagic=Uint8Array.of(73,78,75,86,65,76,0,1);
 const wireEncoder=new TextEncoder(),wireDecoder=new TextDecoder('utf-8',{fatal:true,ignoreBOM:true});
-const wireDefaults={bytes:16777216,nodes:1000000,depth:128};
+const wireDefaults=Object.freeze({bytes:16777216,nodes:1000000,depth:128}),wireDefaultOptions=Object.freeze({});
 const wireDecimal=s=>typeof s==='string'&&/^(0|[1-9][0-9]*|-[1-9][0-9]*)$/.test(s);
-function wireLimits(options){const l={...wireDefaults,...options};for(const k of ['bytes','nodes','depth'])if(!Number.isSafeInteger(l[k])||l[k]<0||l[k]>wireDefaults[k])throw Error('wire hard resource limit');return l;}
+function wireLimits(options){if(options===wireDefaultOptions||options===wireDefaults)return wireDefaults;const l={...wireDefaults,...options};for(const k of ['bytes','nodes','depth'])if(!Number.isSafeInteger(l[k])||l[k]<0||l[k]>wireDefaults[k])throw Error('wire hard resource limit');return l;}
 const wireFloat=new DataView(new ArrayBuffer(4));
 function wireDecodeText(bytes,start,end){
  if(end-start<=16){let text='';for(let i=start;i<end;i++){const byte=bytes[i];if(byte>=128)return wireDecoder.decode(bytes.subarray(start,end));text+=String.fromCharCode(byte);}return text;}
@@ -268,7 +268,7 @@ class WireCaptureCursor{
  text(value){if(value.length>this.limit)throw Error('wire byte limit');this.add(wireUtf8Length(value));}
 }
 // Literal lowerers share this fixed resource policy with logical capture.
-export function createValueCaptureBudget(options={}){return new WireCaptureCursor(wireLimits(options));}
+export function createValueCaptureBudget(options=wireDefaultOptions){return new WireCaptureCursor(wireLimits(options));}
 // The trusted-value API has the same canonical copy and ownership semantics.
 // Its caller supplies a stable value accepted by validateValue. Shape/range
 // checks remain at external capture boundaries; resource limits still apply.
@@ -304,9 +304,9 @@ function wireCopyOperation(p){
 // Emit the cached literal schema with one forward writer. Each value is checked
 // where it is consumed; byte bounds belong to the writer, not a second size walk.
 function wireEncodeValue(root,value,l,w){
- let remaining=l.nodes;
+ let remaining=l.nodes;const depthLimit=l.depth;
  const node=(p,v,d)=>{
-  if(d>l.depth||--remaining<0)throw Error('wire node or depth limit');
+  if(d>depthLimit||--remaining<0)throw Error('wire node or depth limit');
   const t=p.type,start=w.beginNode();
   switch(p.kind){
    case 'unit':if(v!==null)wireInvalidValue();break;
@@ -482,20 +482,20 @@ export class ValueCodec{
   const freeze=v=>{if(v&&typeof v==='object'){Object.values(v).forEach(freeze);Object.freeze(v);}};freeze(this.descriptor);this.#valuePlan=wireValuePlan(this);
  }
  resolve(t){for(let i=0;i<64;i++){if(t.kind!=='ref')return t;t=this.descriptor.named[t.name];if(!t)throw Error('wire reference');}throw Error('wire reference cycle');}
- validateValue(value,options={}){wireCheckValue(this.#valuePlan,value,wireLimits(options));return true;}
- capture(value,options={}){const limits=wireLimits(options);this.#capturePlan??=wireCapturePlan(this.#valuePlan);return this.#capturePlan.capture(value,new WireCaptureCursor(limits),0);}
- copy(value,options={}){const limits=wireLimits(options);this.#copyPlan??=wireCapturePlan(this.#valuePlan,false);return this.#copyPlan.capture(value,new WireCaptureCursor(limits),0);}
+ validateValue(value,options=wireDefaultOptions){wireCheckValue(this.#valuePlan,value,wireLimits(options));return true;}
+ capture(value,options=wireDefaultOptions){const limits=wireLimits(options);this.#capturePlan??=wireCapturePlan(this.#valuePlan);return this.#capturePlan.capture(value,new WireCaptureCursor(limits),0);}
+ copy(value,options=wireDefaultOptions){const limits=wireLimits(options);this.#copyPlan??=wireCapturePlan(this.#valuePlan,false);return this.#copyPlan.capture(value,new WireCaptureCursor(limits),0);}
  compact(){return this.#compactCodec??=new CompactValueCodec(this);}
- encode(value,options={}){
+ encode(value,options=wireDefaultOptions){
   const l=wireLimits(options),w=this.#encoder&&!this.#encoder.active?this.#encoder:new WireEncoder(l);
   this.#encoder??=w;w.reset(l);
   try{w.bytes(this.#header);wireEncodeValue(this.#valuePlan,value,l,w);return w.finish();}
   finally{w.active=false;if(w.capacity>4096&&this.#encoder===w)this.#encoder=undefined;}
  }
- encodeWith(emit,options={}){
+ encodeWith(emit,options=wireDefaultOptions){
   const w=new WireEncoder(options);w.bytes(wireMagic);w.bytes(this.#hash);emit(w);const bytes=w.finish();this.validate(bytes,options);return bytes;
  }
- scan(bytes,options={},materialize=false,visitor=null,names=null,spans=false){
+ scan(bytes,options=wireDefaultOptions,materialize=false,visitor=null,names=null,spans=false){
   const l=wireLimits(options);if(!(bytes instanceof Uint8Array)||typeof SharedArrayBuffer==='function'&&bytes.buffer instanceof SharedArrayBuffer||bytes.length<44||bytes.length>l.bytes)throw Error('wire byte limit or header');
   const view=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);
   for(let i=0;i<10;i++)if(view.getUint32(i*4,true)!==this.#headerWords[i])throw Error('wire format or schema mismatch');
@@ -504,26 +504,26 @@ export class ValueCodec{
   if(!materialize){this.#scanPlan??=wireScanPlan(this.#valuePlan);const cursor=new WireScanCursor(bytes,view,l,visitor,names===null?null:new Set(names),spans),value=this.#scanPlan.scan(cursor,bytes.length,0);if(cursor.cursor!==bytes.length)throw Error('trailing wire bytes');return value;}
   return wireScanValue(this.#valuePlan,bytes,view,l,materialize,visitor,names===null?null:new Set(names),spans);
  }
- visit(bytes,visitor,options={},names=null){if(typeof visitor!=='function')throw Error('wire visitor required');this.scan(bytes,options,false,visitor,names);}
- visitSpans(bytes,visitor,options={},names=null){if(typeof visitor!=='function')throw Error('wire visitor required');this.scan(bytes,options,false,visitor,names,true);}
- validate(bytes,options={}){this.scan(bytes,options,false);return true;}
- decode(bytes,options={}){return this.scan(bytes,options,true);}
+ visit(bytes,visitor,options=wireDefaultOptions,names=null){if(typeof visitor!=='function')throw Error('wire visitor required');this.scan(bytes,options,false,visitor,names);}
+ visitSpans(bytes,visitor,options=wireDefaultOptions,names=null){if(typeof visitor!=='function')throw Error('wire visitor required');this.scan(bytes,options,false,visitor,names,true);}
+ validate(bytes,options=wireDefaultOptions){this.scan(bytes,options,false);return true;}
+ decode(bytes,options=wireDefaultOptions){return this.scan(bytes,options,true);}
 }
 
 // Bounded forward emission avoids building and repeatedly joining child buffers.
 class WireEncoder{
- #data=new Uint8Array(256);#view=new DataView(this.#data.buffer);#at=0;#remaining;#depth=0;#limits;
+ #data=new Uint8Array(256);#view=new DataView(this.#data.buffer);#at=0;#remaining;#depth=0;#byteLimit;#depthLimit;
  active=false;
  constructor(options){this.reset(options);}
- reset(options){this.#limits=wireLimits(options);this.#remaining=this.#limits.nodes;this.#depth=0;this.#at=0;this.active=true;}
+ reset(options){const limits=wireLimits(options);this.#byteLimit=limits.bytes;this.#depthLimit=limits.depth;this.#remaining=limits.nodes;this.#depth=0;this.#at=0;this.active=true;}
  get capacity(){return this.#data.length;}
  get position(){return this.#at;}
  beginNode(){const at=this.#at;this.word(0);return at;}
  endNode(at){this.patchWord(at,this.#at-at-4);}
  count(n){this.word(n);}
  #reserve(size){
-  const end=this.#at+size;if(end>this.#limits.bytes)throw Error('wire byte limit');
-  if(end>this.#data.length){const next=new Uint8Array(Math.min(this.#limits.bytes,Math.max(end,this.#data.length*2)));next.set(this.#data.subarray(0,this.#at));this.#data=next;this.#view=new DataView(next.buffer);}
+  const end=this.#at+size;if(end>this.#byteLimit)throw Error('wire byte limit');
+  if(end>this.#data.length){const next=new Uint8Array(Math.min(this.#byteLimit,Math.max(end,this.#data.length*2)));next.set(this.#data.subarray(0,this.#at));this.#data=next;this.#view=new DataView(next.buffer);}
   return end;
  }
  bytes(bytes){const end=this.#reserve(bytes.length);this.#data.set(bytes,this.#at);this.#at=end;}
@@ -540,7 +540,7 @@ class WireEncoder{
   const end=this.#reserve(size),r=wireEncoder.encodeInto(text,this.#data.subarray(this.#at,end));if(r.read!==text.length||r.written!==size)throw Error('wire UTF-8 size');this.#at=end;
  }
  patchWord(at,n){if(!Number.isInteger(at)||at<0||at+4>this.#at||!Number.isInteger(n)||n<0||n>4294967295)throw Error('wire patch offset');this.#view.setUint32(at,n,true);}
- frame(emit){if(this.#depth>this.#limits.depth||--this.#remaining<0)throw Error('wire node or depth limit');const at=this.position;this.word(0);this.#depth++;try{emit(this);}finally{this.#depth--;}this.patchWord(at,this.position-at-4);}
+ frame(emit){if(this.#depth>this.#depthLimit||--this.#remaining<0)throw Error('wire node or depth limit');const at=this.position;this.word(0);this.#depth++;try{emit(this);}finally{this.#depth--;}this.patchWord(at,this.position-at-4);}
  reorder(start,spans){
   const sorted=spans.slice().sort((a,b)=>a[0]-b[0]);let at=start;
   for(const [a,b] of sorted){if(!Number.isInteger(a)||!Number.isInteger(b)||a!==at||b<a)throw Error('wire span permutation');at=b;}
@@ -621,7 +621,7 @@ export class CompactValueCodec{
  get format(){return compactValueWireFormat;}
  get identity(){return this.#source.descriptor.identity;}
  constructor(valueCodec){if(!(valueCodec instanceof ValueCodec))throw Error('compact codec requires a checked value codec');this.#source=valueCodec;this.#plan=wireValuePlan(valueCodec);}
- encode(value,options={}){
+ encode(value,options=wireDefaultOptions){
   const l=wireLimits(options),w=this.#encoder&&!this.#encoder.active?this.#encoder:new CompactWireEncoder(l);
   this.#encoder??=w;w.reset(l);
   try{w.byte(1);wireEncodeValue(this.#plan,value,l,w);return w.finish();}
@@ -634,8 +634,8 @@ export class CompactValueCodec{
   if(materialize){this.#decodeBound||=wireBindDecodePlan(this.#plan,true);const cursor=new CompactDecodeCursor(bytes,l),value=this.#plan.decodeCompact(cursor,0);if(cursor.cursor!==bytes.length)throw Error('trailing compact bytes');return value;}
   return compactScanValue(this.#plan,bytes,l,materialize);
  }
- decode(bytes,options={}){return this.#scan(bytes,options,true);}
- validate(bytes,options={}){this.#scan(bytes,options,false);return true;}
+ decode(bytes,options=wireDefaultOptions){return this.#scan(bytes,options,true);}
+ validate(bytes,options=wireDefaultOptions){this.#scan(bytes,options,false);return true;}
 }
 
 // Compiler materialisers consume already validated bytes synchronously. This
@@ -655,12 +655,12 @@ class ValidatedValueReader{
 class CompiledCompactValueCodec extends CompactValueCodec{
  #read;
  constructor(source,read){super(source);this.#read=read;}
- decode(bytes,options={}){super.validate(bytes,options);const reader=new ValidatedValueReader(bytes,true),value=this.#read(reader);if(reader.cursor!==bytes.length)throw Error('compiled reader trailing bytes');return value;}
+ decode(bytes,options=wireDefaultOptions){super.validate(bytes,options);const reader=new ValidatedValueReader(bytes,true),value=this.#read(reader);if(reader.cursor!==bytes.length)throw Error('compiled reader trailing bytes');return value;}
 }
 class CompiledValueCodec extends ValueCodec{
  #read;#compiledCompact=null;
  constructor(descriptor,read){super(descriptor);this.#read=read;}
- decode(bytes,options={}){super.validate(bytes,options);const reader=new ValidatedValueReader(bytes,false),value=this.#read(reader);if(reader.cursor!==bytes.length)throw Error('compiled reader trailing bytes');return value;}
+ decode(bytes,options=wireDefaultOptions){super.validate(bytes,options);const reader=new ValidatedValueReader(bytes,false),value=this.#read(reader);if(reader.cursor!==bytes.length)throw Error('compiled reader trailing bytes');return value;}
  compact(){return this.#compiledCompact??=new CompiledCompactValueCodec(this,this.#read);}
 }
 export function createCompiledValueCodec(descriptor,read){if(typeof read!=='function')throw Error('compiled value reader required');return new CompiledValueCodec(descriptor,read);}
