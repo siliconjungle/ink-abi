@@ -200,3 +200,13 @@ pub const SELECTION_JS_SOURCE: &str = include_str!("selection.mjs");
 mod wire_tags;
 pub use wire_tags::InkValueKind as ValueKind;
 pub const VALUE_KIND_RUST_SOURCE:&str=include_str!("wire_tags.rs");
+
+pub mod value_wire;
+pub mod json_value;
+pub const VALUE_WIRE_JS_SOURCE: &str = include_str!("value-wire.mjs");
+pub const JSON_VALUE_JS_SOURCE: &str = include_str!("json-value.mjs");
+pub const VALUE_WIRE_RUST_SOURCE: &str = include_str!("value_wire.rs");
+
+pub mod wire_contract;
+
+pub mod typed_json;

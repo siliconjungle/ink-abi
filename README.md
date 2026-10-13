@@ -39,3 +39,23 @@ logical snapshot types. Operational implementations remain trusted.
 
 Project code and documentation are [MIT licensed](LICENSE). Third-party dependencies,
 vendored projects and research data retain their own licenses and notices.
+
+## JSON and portable values
+
+`value_wire::Schema` defines schema-bound `ink-value-wire-v1` buffers. It encodes,
+decodes and validates ordinary declared values with byte/node/depth budgets.
+Validated Rust views support borrowed field, sum, text and sequence access;
+forward sequence iteration is linear. `source_contract` in `wire_contract`
+derives the same signatures for every lowering from serialized checked types.
+Temporary owners are explicitly unsupported public wire values.
+
+`json_value` preserves exact numeric tokens and rejects duplicate keys, malformed
+Unicode and invalid JSON. `JsonCodec` binds the ordinary JSON knowledge-library
+shape; `TypedJsonCodec` in `typed_json` supplies fallible conversions for arbitrary
+supported descriptors. Public JSON uses exact decimal conversion for Int/words;
+non-finite f32 is binary-only. JavaScript sources expose equivalent codecs, a
+bounded byte visitor and `JsonCodec.validateBinary` without a document tree.
+Untrusted descriptors use async `createValueCodec`; the synchronous constructor
+consumes trusted compiler metadata. Keep transport, codec checking and mathematical
+rewrite authority separate. See the distribution's `docs/json-and-portable-values.md`
+and run `cargo test --locked`, including cross-language adversarial fixtures.

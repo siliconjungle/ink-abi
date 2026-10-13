@@ -15,6 +15,10 @@ uint32_t lang_error(void);
 /* JSON requests: {"call":"action","args":[...]} or {"pure":"fn","args":[...]}.
    Responses: {"ok":...} or {"error":{"message":...,"committed":false}}. */
 uint32_t lang_invoke(uint32_t state, uint32_t request);
+/* Optional pure-call value-wire extension. Function indices enumerate sorted
+   supported wire signature names. Input/output are raw ink-value-wire-v1 bytes;
+   zero means failure, read lang_error. No JSON envelope or state commit. */
+uint32_t lang_call_binary(uint32_t state, uint32_t function, uint32_t arguments);
 uint32_t lang_checkpoint(uint32_t state);
 uint32_t lang_restore(uint32_t snapshot);
 uint32_t lang_events(uint32_t state);
