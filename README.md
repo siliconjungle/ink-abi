@@ -104,6 +104,16 @@ for arbitrary callbacks. Untrusted schemas continue to use `createValueCodec`.
 Buffer/header/schema, Unicode, count and resource checks remain independent of
 the generated materialiser, and generic decoding remains a conformance oracle.
 
+Trusted emitters may instead use `createFusedValueCodec(descriptor, read)`.
+Its reader checks headers, each nested frame, source node/depth limits, scalar
+widths, Boolean/sum tags, UTF-8, canonical Int/Id/enum text, vector lengths and
+canonical compact counts while constructing owned values. Emitters must bracket
+every source node with `frame()/finish()`, use typed text reads and counted
+sequence reads, and preserve the exact descriptor. This contract is a backend
+correctness obligation; an arbitrary callback does not prove correspondence to
+the schema. The independent generic decoder remains the adversarial oracle.
+Structural admission does not establish JSON number grammar or unique members.
+
 ### Plain JavaScript object boundary
 
 `JsonCodec.fromJS(value, limits)` captures a plain JavaScript object tree as the

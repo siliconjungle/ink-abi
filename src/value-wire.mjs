@@ -698,3 +698,79 @@ class CompiledValueCodec extends ValueCodec{
  compact(){return this.#compiledCompact??=new CompiledCompactValueCodec(this,this.#read);}
 }
 export function createCompiledValueCodec(descriptor,read){if(typeof read!=='function')throw Error('compiled value reader required');return new CompiledValueCodec(descriptor,read);}
+
+// Trusted literal materialisers may use this checked reader to validate and
+// construct in one traversal. The emitter must use frame/finish at every source
+// node, typed text reads and counted sequence reads; arbitrary callbacks do not
+// establish a schema correspondence proof. The independent scanner remains the
+// validation oracle and the original factory retains its pre-validation path.
+function literalValueHeader(identity){
+ const bytes=new Uint8Array(40);bytes.set(wireMagic);
+ for(let i=0;i<32;i++)bytes[i+8]=parseInt(identity.slice(i*2,i*2+2),16);
+ const view=new DataView(bytes.buffer),words=new Uint32Array(10);
+ for(let i=0;i<10;i++)words[i]=view.getUint32(i*4,true);
+ return words;
+}
+class CheckedLiteralValueReader {
+ constructor(bytes,header,compact,options){
+  const limits=wireLimits(options);
+  if(!(bytes instanceof Uint8Array)||typeof SharedArrayBuffer==='function'&&bytes.buffer instanceof SharedArrayBuffer||bytes.length<(compact?1:44)||bytes.length>limits.bytes)throw Error('wire byte limit or header');
+  const view=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);
+  if(compact){if(bytes[0]!==1)throw Error('compact format mismatch');}
+  else for(let i=0;i<10;i++)if(view.getUint32(i*4,true)!==header[i])throw Error('wire format or schema mismatch');
+  this.bytes=bytes;this.view=view;
+  this.cursor=compact?1:40;this.compact=compact;this.remaining=limits.nodes;this.depth=limits.depth;this.ends=[];
+ }
+ require(n){if(this.cursor+n>(this.ends.at(-1)??this.bytes.length))throw Error('truncated wire frame');}
+ frame(){
+  if(this.ends.length>this.depth||--this.remaining<0)throw Error('wire node or depth limit');
+  let end=this.bytes.length;
+  if(!this.compact){this.require(4);end=this.cursor+4+this.view.getUint32(this.cursor,true);this.require(end-this.cursor);this.cursor+=4;}
+  this.ends.push(end);return this.compact?0:end;
+ }
+ finish(end){
+  if(!this.ends.length||!this.compact&&(this.ends.at(-1)!==end||this.cursor!==end))throw Error('compiled reader frame mismatch');
+  this.ends.pop();
+ }
+ byte(){this.require(1);const value=this.bytes[this.cursor++];if(value>1)throw Error('wire sum tag or Bool');return value;}
+ word(){this.require(4);const value=this.view.getUint32(this.cursor,true);this.cursor+=4;return value;}
+ signed(){this.require(4);const value=this.view.getInt32(this.cursor,true);this.cursor+=4;return value;}
+ wide(){this.require(8);const value=this.view.getBigUint64(this.cursor,true);this.cursor+=8;return value;}
+ rawCount(){
+  if(!this.compact)return this.word();
+  let value=0,scale=1;
+  for(let i=0;i<5;i++){
+   this.require(1);const byte=this.bytes[this.cursor++];
+   if(i===4&&byte>15)throw Error('compact count overflow');
+   value+=(byte&127)*scale;
+   if(byte<128){if(i>0&&byte===0)throw Error('noncanonical compact count');return value;}
+   scale*=128;
+  }
+  throw Error('compact count overflow');
+ }
+ count(size){
+  const value=this.rawCount();
+  if(value>this.remaining||size!==undefined&&value!==size)throw Error('wire sequence size');
+  return value;
+ }
+ text(end,kind='string',variants){
+  const size=this.compact?this.rawCount():end-this.cursor;
+  this.require(size);const start=this.cursor;this.cursor+=size;
+  const value=wireDecodeText(this.bytes,start,this.cursor);
+  if(kind==='int'&&!wireDecimal(value)||kind==='id'&&!/^[0-9a-f]{32}$/.test(value)||kind==='enum'&&!variants.includes(value))throw Error('malformed wire text');
+  return value;
+ }
+ complete(){if(this.ends.length||this.cursor!==this.bytes.length)throw Error('compiled reader trailing bytes');}
+}
+class FusedCompactValueCodec extends CompactValueCodec {
+ #read;
+ constructor(source,read){super(source);this.#read=read;}
+ decode(bytes,options=wireDefaultOptions){const reader=new CheckedLiteralValueReader(bytes,null,true,options),value=this.#read(reader);reader.complete();return value;}
+}
+class FusedValueCodec extends ValueCodec {
+ #read;#header;#fusedCompact=null;
+ constructor(descriptor,read){super(descriptor);this.#read=read;this.#header=literalValueHeader(this.descriptor.identity);}
+ decode(bytes,options=wireDefaultOptions){const reader=new CheckedLiteralValueReader(bytes,this.#header,false,options),value=this.#read(reader);reader.complete();return value;}
+ compact(){return this.#fusedCompact??=new FusedCompactValueCodec(this,this.#read);}
+}
+export function createFusedValueCodec(descriptor,read){if(typeof read!=='function')throw Error('compiled value reader required');return new FusedValueCodec(descriptor,read);}
