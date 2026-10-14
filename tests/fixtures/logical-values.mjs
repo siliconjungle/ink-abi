@@ -66,9 +66,9 @@ const assertDetached=(input,output)=>{const old=objects(input);for(const object 
 // Independent framing oracle: recurse over descriptors through the public
 // forward writer, rather than the compiled encode plan. Inputs are decoded
 // canonical carriers, so the oracle only specifies bytes, not validation.
-function referenceBytes(codec,value){
- return codec.encodeWith(w=>{
-  const emit=(type,v)=>{const t=codec.resolve(type);w.frame(()=>{
+function referenceBytes(codec,value,direct=false,options={},compact=false){
+ return (compact?codec.compact():codec).encodeWith(w=>{
+  const emit=(type,v)=>{const t=codec.resolve(type);const body=()=>{
    switch(t.kind){
     case 'unit':break;
     case 'bool':w.byte(+v);break;
@@ -78,13 +78,13 @@ function referenceBytes(codec,value){
     case 'int':w.text(v.Int);break;
     case 'string':case 'id':case 'enum':w.text(v);break;
     case 'record':for(const f of t.fields)emit(f.type,v[f.name]);break;
-    case 'list':case 'vector':w.word(v.length);for(const item of v)emit(t.element,item);break;
+    case 'list':case 'vector':w.count(v.length);for(const item of v)emit(t.element,item);break;
     case 'option':if(Object.hasOwn(v,'None'))w.byte(0);else{w.byte(1);emit(t.element,v.Some);}break;
     case 'result':if(Object.hasOwn(v,'Ok')){w.byte(0);emit(t.ok,v.Ok);}else{w.byte(1);emit(t.error,v.Err);}break;
     default:throw Error('unsupported oracle kind');
    }
-  });};emit(codec.descriptor.root,value);
- });
+  };if(direct){const frame=w.openFrame();body();w.closeFrame(frame);}else w.frame(body);};emit(codec.descriptor.root,value);
+ },options);
 }
 for(const type of types){
  const codec=await createValueCodec(type,type===node?{Node:node}:{});
@@ -434,3 +434,53 @@ for(const kind of ['u32','u64','i32','int','f32','bool','unit','string','enum','
  }
 }
 console.log('direct compact JSON emission preserves schema bytes, resources and counted prefixes');
+
+// Balanced literal framing has the same bytes, limits and error recovery as
+// callback framing for every scalar and recursive collection carrier above.
+for(const type of types){
+ const codec=await createValueCodec(type,type===node?{Node:node}:{});
+ for(const input of samples){
+  if(!outcome(()=>codec.encode(input)))continue;
+  const value=codec.decode(codec.encode(input));
+  for(const compact of [false,true]){
+   const bytes=(compact?codec.compact():codec).encode(value);
+   for(const limits of [{},{nodes:0},{nodes:1},{nodes:2},{nodes:8},{depth:0},{depth:1},{depth:2},{bytes:bytes.length},{bytes:bytes.length-1}]){
+    const result=direct=>{try{return {bytes:referenceBytes(codec,value,direct,limits,compact)};}catch(e){return {error:e.message};}};
+    assert.deepEqual(result(true),result(false));
+   }
+   assert.deepEqual(referenceBytes(codec,value,true,{},compact),bytes);
+  }
+ }
+}
+for(const compact of [false,true]){
+ const codec=await createValueCodec({kind:'unit'}),writer=compact?codec.compact():codec;
+ assert.throws(()=>writer.encodeWith(w=>w.openFrame()),/frame boundary/);
+ assert.throws(()=>writer.encodeWith(w=>w.closeFrame(0)),/frame boundary/);
+ assert.throws(()=>writer.encodeWith(w=>{w.openFrame();throw Error('literal writer failure');}),/literal writer failure/);
+ assert.deepEqual(writer.encodeWith(w=>{const at=w.openFrame();w.closeFrame(at);}),writer.encode(null));
+}
+console.log('balanced literal frames preserve bytes, resource failures and recovery');
+
+// Direct numeric word emission retains exact rounding, signed zero, boundaries
+// and byte/node/depth diagnostics, including failed and subsequent calls.
+for(const kind of ['f32','u32','i32','u64']){
+ const codec=new TypedJsonCodec(await createValueCodec({kind}));
+ for(const text of ['-0','0','1','-1','4294967295','4294967296','-2147483648','-2147483649','18446744073709551615','18446744073709551616','1.401298464324817e-45','7e-46','-7e-46','3.4028234663852886e38','3.4028236e38','1e-1000','1e1000']){
+  const valid=outcome(()=>codec.parse(text));
+  for(const compact of [false,true]){
+   const emit=limits=>compact?codec.parseCompact(text,limits):codec.parseBinary(text,limits);
+   assert.equal(outcome(()=>emit()),valid,kind+' '+text);
+   if(valid){
+    const expected=(compact?codec.values.compact():codec.values).encode(codec.parse(text));
+    assert.deepEqual(emit(),expected);
+    for(const limits of [{nodes:0},{depth:0},{bytes:expected.length},{bytes:expected.length-1}]){
+     // Text ingress and encoded output each obey the declared byte limit.
+     const inputFits=limits.bytes===undefined||Buffer.byteLength(text)<=limits.bytes;
+     assert.equal(outcome(()=>emit(limits)),inputFits&&outcome(()=>(compact?codec.values.compact():codec.values).encode(codec.parse(text),limits)));
+    }
+   }
+  }
+ }
+ assert.deepEqual(codec.parseBinary('0'),codec.values.encode(codec.parse('0')));
+}
+console.log('direct typed numeric words preserve exact values and resource failures');

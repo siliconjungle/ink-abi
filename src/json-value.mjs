@@ -13,6 +13,8 @@ function jsonNumberSpan(bytes,lo,hi){
  return at===hi;
 }
 const jsonWireEncoder=new TextEncoder();
+// Scalar conversion completes before writer callbacks; no per-value byte array.
+const jsonFloatScratch=new DataView(new ArrayBuffer(4));
 function jsonUtf8Length(text){if(text.length>16&&!/[^\x00-\x7f]/.test(text))return text.length;let bytes=0;for(let i=0;i<text.length;i++){const c=text.charCodeAt(i);if(c<128)bytes++;else if(c<2048)bytes+=2;else if(c>=0xd800&&c<=0xdbff){bytes+=4;i++;}else bytes+=3;}return bytes;}
 const jsonLimits={bytes:16777216,nodes:1000000,depth:128};
 function checkedJsonLimits(options){const l={...jsonLimits,...options};for(const k of ['bytes','nodes','depth'])if(!Number.isSafeInteger(l[k])||l[k]<0||l[k]>jsonLimits[k])throw Error('JSON hard resource limit');return l;}
@@ -396,10 +398,8 @@ function streamJsonBinary(values,text,options,typed,compact=false){
    if(['string','id','enum'].includes(t.kind)){if(ch!=='"')bad();w.text(v);return;}
    if(ch!=='-'&&!(ch>='0'&&ch<='9'))bad();
    if(t.kind==='int'){w.text(jsonInteger(v,4096));return;}
-   const size=t.kind==='u64'?8:4,b=new Uint8Array(size),dv=new DataView(b.buffer);
-   if(t.kind==='f32'){dv.setFloat32(0,Number(v),true);if(!Number.isFinite(dv.getFloat32(0,true)))throw Error('JSON f32 overflow');}
-   else{const n=BigInt(jsonInteger(v,t.kind==='u64'?20:10));if(t.kind==='u64'){if(n<0n||n>18446744073709551615n)bad();dv.setBigUint64(0,n,true);}else if(t.kind==='u32'){if(n<0n||n>4294967295n)bad();dv.setUint32(0,Number(n),true);}else if(t.kind==='i32'){if(n< -2147483648n||n>2147483647n)bad();dv.setInt32(0,Number(n),true);}else bad();}
-   w.bytes(b);
+   if(t.kind==='f32'){jsonFloatScratch.setFloat32(0,Number(v),true);if(!Number.isFinite(jsonFloatScratch.getFloat32(0,true)))throw Error('JSON f32 overflow');w.word(jsonFloatScratch.getUint32(0,true));}
+   else{const n=BigInt(jsonInteger(v,t.kind==='u64'?20:10));if(t.kind==='u64'){if(n<0n||n>18446744073709551615n)bad();w.wide(n);}else if(t.kind==='u32'){if(n<0n||n>4294967295n)bad();w.word(Number(n));}else if(t.kind==='i32'){if(n< -2147483648n||n>2147483647n)bad();w.word(Number(n)>>>0);}else bad();}
   });
  };
  return (compact?values.compact():values).encodeWith(w=>{if(typed)read(values.descriptor.root,w,0);else json(w,0);p.finish();},options);
