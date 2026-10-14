@@ -216,7 +216,10 @@ function compiledJsonRenderer(json,codec,unwrap){
   const role=roles.get(node.name);nodeRoles.set(index,role);
   if(node.kind==='record'){
    if(role==='root')return value=>value;
-   if(role==='member')return (key,value,context)=>({key,text:context.add(JSON.stringify(key)+':')+value});
+   if(role==='member')return (key,value,context)=>{
+    const text=context.add(JSON.stringify(key)+':')+value,seen=context.members;
+    if(seen.has(key))throw Error('duplicate JSON object key');seen.add(key);return text;
+   };
    if(role===0)return context=>context.add('null');
    if(role===1)return (value,context)=>context.add(value?'true':'false');
    if(role===2)return (token,context)=>{if(!jsonNumberToken(token))throw Error('invalid JSON number');return context.add(token);};
@@ -228,9 +231,12 @@ function compiledJsonRenderer(json,codec,unwrap){
   if(node.kind==='list'||node.kind==='vector'){
    const members=nodeRoles.get(node.children[0])==='member';
    return {
-    start:()=>({text:'',seen:members?new Set():null}),
-    step:(out,value,index,context)=>{if(members){if(out.seen.has(value.key))throw Error('duplicate JSON object key');out.seen.add(value.key);}out.text+=(index?context.add(','):'')+(members?value.text:value);return out;},
-    finish:out=>out.text,
+    start:(_length,context)=>{
+     const out={text:'',parent:members?context.members:null};
+     if(members)context.members=new Set();return out;
+    },
+    step:(out,value,index,context)=>{out.text+=(index?context.add(','):'')+value;return out;},
+    finish:(out,context)=>{if(members)context.members=out.parent;return out.text;},
    };
   }
   if(node.kind==='result'){
