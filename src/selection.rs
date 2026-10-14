@@ -30,7 +30,7 @@ pub fn validate_profile(v: &Value, target: &str) -> Result<(), String> {
     {
         return Err("cost profile target/byte budget".into());
     }
-    if (v["schema"] != 1 && v["schema"] != 2) || v["target_key"].as_str() != Some(target) {
+    if (v["schema"] != 1 && v["schema"] != 2 && v["schema"] != 3) || v["target_key"].as_str() != Some(target) {
         return Err("invalid cost profile target/schema".into());
     }
     let models = object(&v["models"])?;
@@ -64,6 +64,11 @@ pub fn validate_profile(v: &Value, target: &str) -> Result<(), String> {
                 return Err("invalid profile backend".into());
             }
             price(&p["intercept_ns"])?;
+            if v["schema"] == 3 {
+                crate::joint_domain::validate(&p["support"], domains)?;
+            } else if p.get("support").is_some() {
+                return Err("joint support requires profile schema 3".into());
+            }
             for (n, w) in object(&p["terms"])? {
                 if !FEATURES.contains(&n.as_str()) || !domains.contains_key(n) {
                     return Err("invalid profile term".into());
@@ -71,7 +76,7 @@ pub fn validate_profile(v: &Value, target: &str) -> Result<(), String> {
                 price(w)?;
             }
             if let Some(products) = p.get("products") {
-                if v["schema"] != 2 { return Err("product costs require profile schema 2".into()); }
+                if v["schema"] != 2 && v["schema"] != 3 { return Err("product costs require profile schema 2 or 3".into()); }
                 let products = products.as_array().ok_or("invalid profile products")?;
                 if products.len() > 32 { return Err("profile product budget".into()); }
                 for product in products {
@@ -131,6 +136,9 @@ pub fn decide(options: &Value, context: &Value, eligible: &[String]) -> Result<V
         if comparable {
             for candidate in eligible {
                 if let Some(p) = model["backends"].get(candidate) {
+                    if profile["schema"] == 3 && !crate::joint_domain::contains(&p["support"], features)? {
+                        continue;
+                    }
                     let mut estimate = object(&p["terms"])?
                         .iter()
                         .fold(price(&p["intercept_ns"])?, |v, (n, w)| {

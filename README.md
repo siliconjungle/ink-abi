@@ -24,6 +24,18 @@ An alternative needs more than 10% predicted savings. Hosts perform no probe run
 Runtime owns device failure, resource limits and CPU fallback; it supplies the
 eligible candidates. This package grants no mathematical admission authority.
 
+Schema-3 cost profiles require `support` on every backend model. It contains
+the domain feature names, affine `equalities` and convex `inequalities`. A row
+contains canonical integer strings `[constant, coefficient, ...]`; its expression
+must equal zero or be at most zero, respectively. Each domain has at most five
+features and 4096 constraints, with at most 256 decimal digits per integer.
+Features are evaluated as exact binary64 dyadic values, without tolerance
+widening. Predictions outside a backend's joint domain are omitted; without
+a supported CPU prediction the decision retains CPU. This executes saved
+constraints only, with no runtime hull construction, fitting or measurements.
+Schema-1/2 profiles retain their older per-feature checks; support metadata in
+those versions is rejected. Model data remains untrusted profitability evidence.
+
 Run `cargo test --locked` with Node available. To rebuild browser decisions, install
 `wasm32-unknown-unknown` and run `tools/build-selection.sh`. The committed Wasm and
 source fingerprint travel together; CI checks the fingerprint, tests that artifact,

@@ -39,6 +39,23 @@ fn same_decision_in_native_and_browser_wasm() {
         assert_eq!(expected["dispatches"], iterations * 2);
         cases.push(json!({"request":request,"expected":expected}));
     }
+    // Saved joint support narrows ranges without online fitting or probes.
+    // A triangle excludes (9,9), although both independent ranges admit it.
+    let support=json!({"features":["input_elements","iterations"],"equalities":[],"inequalities":[["0","-1","0"],["0","0","-1"],["-10","1","1"]]});
+    let mut joint=json!({"policy":"adaptive","target_key":"device","cost_profile":{"schema":3,"target_key":"device","models":{"joint":{"boundary":"captured-owned","domains":{"input_elements":[0,10],"iterations":[0,10]},"backends":{
+        "cpu":{"intercept_ns":1000,"terms":{},"support":support},
+        "gpu":{"intercept_ns":1,"terms":{},"support":support}
+    }}}}});
+    for (n,k,backend) in [(0.0,0.0,"gpu"),(2.0,3.0,"gpu"),(5.0,5.0,"gpu"),(9.0,9.0,"cpu"),(5.0,f64::from_bits(5.0f64.to_bits()+1),"cpu")] {
+        let request=json!({"options":joint,"context":{"scope":"joint","boundary":"captured-owned","features":{"input_elements":n,"iterations":k}},"eligible":["cpu","gpu"]});
+        let expected=ink_abi::selection::request(&request).unwrap();assert_eq!(expected["backend"],backend);
+        cases.push(json!({"request":request,"expected":expected}));
+    }
+    // A candidate inside its own support cannot switch without supported CPU.
+    joint["cost_profile"]["models"]["joint"]["backends"]["cpu"]["support"]["equalities"]=json!([["0","1","-1"]]);
+    let request=json!({"options":joint,"context":{"scope":"joint","boundary":"captured-owned","features":{"input_elements":2,"iterations":3}},"eligible":["cpu","gpu"]});
+    let expected=ink_abi::selection::request(&request).unwrap();assert_eq!(expected["backend"],"cpu");
+    cases.push(json!({"request":request,"expected":expected}));
     let dir = std::env::temp_dir().join(format!("ink-selection-parity-{}", std::process::id()));
     std::fs::create_dir_all(&dir).unwrap();
     std::fs::write(dir.join("ink-selection.wasm"), ink_abi::SELECTION_WASM).unwrap();
@@ -79,4 +96,20 @@ fn product_models_require_versioned_bounded_features() {
     }
     let mut negative=base;negative["models"]["session"]["backends"]["cpu"]["products"][0]["coefficient_ns"]=json!(-1);
     assert!(ink_abi::selection::validate_profile(&negative,"device").is_err());
+}
+
+#[test]
+fn joint_domains_require_versioned_bounded_canonical_constraints() {
+    let support=json!({"features":["iterations"],"equalities":[],"inequalities":[["-10","1"]]});
+    let base=json!({"schema":3,"target_key":"device","models":{"joint":{"boundary":"captured-owned","domains":{"iterations":[0,10]},"backends":{"cpu":{"intercept_ns":1,"terms":{},"support":support}}}}});
+    assert!(ink_abi::selection::validate_profile(&base,"device").is_ok());
+    for schema in [1,2] {let mut bad=base.clone();bad["schema"]=json!(schema);assert!(ink_abi::selection::validate_profile(&bad,"device").is_err());}
+    for row in [json!(["0","0"]),json!(["01","1"]),json!(["-0","1"]),json!(["+1","1"]),json!([0,1]),json!(["1"]),json!(["0","1".repeat(257)])] {
+        let mut bad=base.clone();bad["models"]["joint"]["backends"]["cpu"]["support"]["inequalities"]=json!([row]);
+        assert!(ink_abi::selection::validate_profile(&bad,"device").is_err());
+    }
+    for support in [Value::Null,json!({"features":["iterations"],"equalities":[],"inequalities":[]}),json!({"features":["input_bytes"],"equalities":[],"inequalities":[["0","1"]]}),json!({"features":["iterations"],"equalities":[],"inequalities":[["0","1"]],"trusted":true})] {
+        let mut bad=base.clone();bad["models"]["joint"]["backends"]["cpu"]["support"]=support;
+        assert!(ink_abi::selection::validate_profile(&bad,"device").is_err());
+    }
 }

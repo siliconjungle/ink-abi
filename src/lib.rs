@@ -192,6 +192,7 @@ mod tests {
 pub mod packed;
 
 pub mod selection;
+mod joint_domain;
 pub const SELECTION_WASM: &[u8] = include_bytes!("../selection.wasm");
 pub const SELECTION_JS_SOURCE: &str = include_str!("selection.mjs");
 
