@@ -269,3 +269,13 @@ order, missing/null and failed-update atomicity. Explicit `set` invalidates only
 indexes at/below its object; a root replacement clears all. Entry/charged-byte
 budgets and per-lookup construction work are bounded; charged bytes are not a
 heap measurement. They do not replace compiled source actions.
+
+Cost profile schema 2 preserves the schema-1 linear terms and adds optional
+`products` to each backend price: `{"features":["input_elements","iterations"],
+"coefficient_ns":10}`. There are at most 32 products, with two or three factors
+each. Every factor is an existing workload feature with an explicit observed
+domain. Coefficients remain finite, nonnegative and bounded. The native/Wasm
+selector evaluates the same expression and retains its CPU comparison and 10%
+minimum predicted saving. Schema 1 cannot contain these terms, so an older
+consumer rejects the new schema instead of silently ignoring part of a price.
+These expressions are profitability estimates, never proof premises.

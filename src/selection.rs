@@ -30,7 +30,7 @@ pub fn validate_profile(v: &Value, target: &str) -> Result<(), String> {
     {
         return Err("cost profile target/byte budget".into());
     }
-    if v["schema"] != 1 || v["target_key"].as_str() != Some(target) {
+    if (v["schema"] != 1 && v["schema"] != 2) || v["target_key"].as_str() != Some(target) {
         return Err("invalid cost profile target/schema".into());
     }
     let models = object(&v["models"])?;
@@ -69,6 +69,20 @@ pub fn validate_profile(v: &Value, target: &str) -> Result<(), String> {
                     return Err("invalid profile term".into());
                 }
                 price(w)?;
+            }
+            if let Some(products) = p.get("products") {
+                if v["schema"] != 2 { return Err("product costs require profile schema 2".into()); }
+                let products = products.as_array().ok_or("invalid profile products")?;
+                if products.len() > 32 { return Err("profile product budget".into()); }
+                for product in products {
+                    let factors = product["features"].as_array().ok_or("invalid product features")?;
+                    if !(2..=3).contains(&factors.len()) { return Err("profile product degree".into()); }
+                    for factor in factors {
+                        let name = factor.as_str().ok_or("invalid product feature")?;
+                        if !FEATURES.contains(&name) || !domains.contains_key(name) { return Err("unbounded product feature".into()); }
+                    }
+                    price(&product["coefficient_ns"])?;
+                }
             }
         }
     }
@@ -117,11 +131,19 @@ pub fn decide(options: &Value, context: &Value, eligible: &[String]) -> Result<V
         if comparable {
             for candidate in eligible {
                 if let Some(p) = model["backends"].get(candidate) {
-                    let estimate = object(&p["terms"])?
+                    let mut estimate = object(&p["terms"])?
                         .iter()
                         .fold(price(&p["intercept_ns"])?, |v, (n, w)| {
                             v + w.as_f64().unwrap() * features[n].as_f64().unwrap()
                         });
+                    if let Some(products) = p.get("products").and_then(Value::as_array) {
+                        for product in products {
+                            let value = product["features"].as_array().unwrap().iter().fold(
+                                product["coefficient_ns"].as_f64().unwrap(),
+                                |v, n| v * features[n.as_str().unwrap()].as_f64().unwrap());
+                            estimate += value;
+                        }
+                    }
                     if estimate.is_finite() {
                         costs.insert(candidate.clone(), json!(estimate));
                     }
