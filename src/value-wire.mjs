@@ -765,12 +765,21 @@ class CheckedLiteralValueReader {
  }
  complete(){if(this.ends.length||this.cursor!==this.bytes.length)throw Error('compiled reader trailing bytes');}
 }
+// Compact source nodes have no individual frame ends: retain the same checked
+// depth/node order using a counter, with bounds against the complete buffer.
+class CheckedCompactLiteralValueReader extends CheckedLiteralValueReader {
+ constructor(bytes,limits){super(bytes,null,true,limits);this.level=0;}
+ require(n){if(this.cursor+n>this.bytes.length)throw Error('truncated wire frame');}
+ frame(){if(this.level>this.depth||--this.remaining<0)throw Error('wire node or depth limit');this.level++;return 0;}
+ finish(_end){if(!this.level)throw Error('compiled reader frame mismatch');this.level--;}
+ complete(){if(this.level||this.cursor!==this.bytes.length)throw Error('compiled reader trailing bytes');}
+}
 class FusedCompactValueCodec extends CompactValueCodec {
  #read;
  constructor(source,read){super(source);this.#read=read;}
  decode(bytes,options=wireDefaultOptions){
   const limits=wireLimits(options);
-  try{const reader=new CheckedLiteralValueReader(bytes,null,true,limits),value=this.#read(reader);reader.complete();return value;}
+  try{const reader=new CheckedCompactLiteralValueReader(bytes,limits),value=this.#read(reader);reader.complete();return value;}
   catch(error){super.validate(bytes,limits);throw error;}
  }
 }

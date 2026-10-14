@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import {createValueCodec,createCompiledValueCodec,CompactValueCodec,ValueCodec} from './value-wire.mjs';
+import {createValueCodec,createCompiledValueCodec,createFusedValueCodec,CompactValueCodec,ValueCodec} from './value-wire.mjs';
 const scalar=k=>({kind:k});
 const node={kind:'record',name:'Node',fields:[{name:'text',type:scalar('string')},{name:'next',type:{kind:'option',element:{kind:'ref',name:'Node'}}}]};
 const types=[...['unit','bool','u32','i32','u64','int','f32','string'].map(scalar),
@@ -497,3 +497,19 @@ for(const config of [{maxEntries:0,maxBytes:0},{maxEntries:2,maxBytes:128},{maxE
 }
 for(const config of [{maxEntries:-1},{maxEntries:65537},{maxEntries:1.5},{maxBytes:-1},{maxBytes:16777217}])assert.throws(()=>createJsonQuoter(config),/budget/);
 console.log('bounded immutable JSON quotation retains values and explicit cache caps');
+
+// Compact checked readers need depth, but have no per-node end positions.
+const pairs=await createValueCodec({kind:'list',element:{kind:'record',name:'Pair',fields:[{name:'flag',type:scalar('bool')},{name:'text',type:scalar('string')}]}});
+const literalPairs=r=>{const list=r.frame(),n=r.count(),out=[];for(let i=0;i<n;i++){const row=r.frame(),bool=r.frame(),flag=!!r.byte();r.finish(bool);const string=r.frame(),text=r.text(string);r.finish(string);r.finish(row);out.push({flag,text});}r.finish(list);return out;};
+const fusedPairs=createFusedValueCodec(pairs.descriptor,literalPairs);
+for(const compact of [false,true]){
+ const baseline=compact?pairs.compact():pairs,fast=compact?fusedPairs.compact():fusedPairs;
+ for(const value of [[],[{flag:true,text:'雪😀'}],Array.from({length:32},(_,i)=>({flag:!!(i%2),text:'k'+i}))]){
+  const bytes=baseline.encode(value);assert.deepEqual(fast.decode(bytes),value);
+  for(const limits of [{nodes:0},{nodes:1},{nodes:3},{depth:0},{depth:1},{depth:2},{bytes:bytes.length-1},{}])assert.equal(outcome(()=>fast.decode(bytes,limits)),outcome(()=>baseline.decode(bytes,limits)));
+  for(let i=0;i<bytes.length;i++)assert.equal(outcome(()=>fast.decode(bytes.subarray(0,i))),outcome(()=>baseline.decode(bytes.subarray(0,i))));
+  for(let i=0;i<bytes.length;i++){const bad=bytes.slice();bad[i]^=255;const a=outcome(()=>fast.decode(bad)),b=outcome(()=>baseline.decode(bad));assert.equal(a,b);if(a)assert.deepEqual(fast.decode(bad),baseline.decode(bad));}
+  assert.throws(()=>fast.decode(Uint8Array.from([...bytes,0])));
+ }
+}
+console.log('compact depth counters preserve checked frames, errors, Unicode and reduced limits');
