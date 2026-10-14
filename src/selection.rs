@@ -200,6 +200,10 @@ pub fn features(v: &Value) -> Result<Value, String> {
 }
 
 pub fn request(v: &Value) -> Result<Value, String> {
+    if v["operation"] == "adaptive-state" {
+        let request = serde_json::from_value(v["request"].clone()).map_err(|e| e.to_string())?;
+        return serde_json::to_value(crate::adaptive::decide(&request)?).map_err(|e| e.to_string());
+    }
     if v["operation"] == "features" {
         return features(&v["workload"]);
     }

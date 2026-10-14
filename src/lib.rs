@@ -213,3 +213,5 @@ pub mod typed_json;
 
 mod json_stream;
 pub mod wire_packed;
+
+pub mod adaptive;
