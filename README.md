@@ -161,6 +161,15 @@ in existing calls. It makes no unconditional performance promise. Format validit
 also remains distinct from source typing: constructing a String leaf does not
 prove it is a valid JSON number token. Rendering retains its format checks.
 
+`JsonCodec.stringifyCompiled(compiledCodec, handle, limits)` renders through a
+generated codec's generic, literal typed reducer. It avoids materialising a
+logical `Json` tree, preserves exact number tokens and member order, and checks
+numeric grammar, Unicode, duplicates and output bytes. Source resource limits
+still apply. A `Result<Json,E>` output requires `{unwrapResult:true}` and rejects
+Err; this option does not turn a failed action into a successful one. The codec
+must match the exact JSON schema. This explicit adapter leaves ordinary
+`stringify` calls unchanged; lifecycle measurements determine profitability.
+
 ### Agreed-schema JavaScript transport
 
 `valueCodec.compact()` returns a cached `CompactValueCodec` with the exact same

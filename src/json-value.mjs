@@ -198,6 +198,51 @@ function parseJsonConstructed(text,options,builder){
  };
  value(0);p.finish();return builder.finish();
 }
+const jsonCompiledRenderers=new WeakMap();
+function compiledJsonRenderer(json,codec,unwrap){
+ if(typeof codec?.reducer!=='function')throw Error('compiled JSON reduction unavailable');
+ const source=codec.resolve(codec.descriptor.root),root=json.values.descriptor.root;
+ const selected=unwrap&&source.kind==='result'?codec.resolve(source.ok):source;
+ if(!jsonSameSchema(root,selected)||unwrap&&source.kind!=='result')throw Error('compiled JSON schema mismatch');
+ let variants=root.fields[0].type;const roles=new Map([[root.name,'root']]);
+ let member;
+ for(let index=0;index<6;index++){
+  const branch=index<5?variants.ok:variants;roles.set(branch.name,index);
+  if(index===5){member=branch.fields[0].type.element.name;roles.set(member,'member');}
+  if(index<5)variants=variants.error;
+ }
+ const nodeRoles=new Map();
+ return codec.reducer((node,index)=>{
+  const role=roles.get(node.name);nodeRoles.set(index,role);
+  if(node.kind==='record'){
+   if(role==='root')return value=>value;
+   if(role==='member')return (key,value,context)=>({key,text:context.add(JSON.stringify(key)+':')+value});
+   if(role===0)return context=>context.add('null');
+   if(role===1)return (value,context)=>context.add(value?'true':'false');
+   if(role===2)return (token,context)=>{if(!jsonNumberToken(token))throw Error('invalid JSON number');return context.add(token);};
+   if(role===3)return (value,context)=>context.add(JSON.stringify(value));
+   if(role===4)return (value,context)=>{context.add('[]');return '['+value+']';};
+   if(role===5)return (value,context)=>{context.add('{}');return '{'+value+'}';};
+   return ()=>null;
+  }
+  if(node.kind==='list'||node.kind==='vector'){
+   const members=nodeRoles.get(node.children[0])==='member';
+   return {
+    start:()=>({text:'',seen:members?new Set():null}),
+    step:(out,value,index,context)=>{if(members){if(out.seen.has(value.key))throw Error('duplicate JSON object key');out.seen.add(value.key);}out.text+=(index?context.add(','):'')+(members?value.text:value);return out;},
+    finish:out=>out.text,
+   };
+  }
+  if(node.kind==='result'){
+   // A Result<Json,E> boundary is explicitly requested by the caller. Ordinary
+   // JSON's own sums only propagate an already rendered branch.
+   if(unwrap&&nodeRoles.get(node.children[0])==='root')return (tag,value)=>{if(tag)throw Error('JSON result is Err');return value;};
+   return (_tag,value)=>value;
+  }
+  if(node.kind==='string')return value=>{if(!value.isWellFormed())throw Error('invalid JSON String');return value;};
+  return value=>value;
+ });
+}
 export class JsonCodec{
  constructor(valueCodec){
   const root=valueCodec.descriptor.root,fields=root.fields;if(root.kind!=='record'||!Array.isArray(fields)||fields.length!==1||fields[0].name!=='payload')throw Error('JSON schema payload');let sum=fields[0].type;
@@ -215,6 +260,15 @@ export class JsonCodec{
   const builder=codec.builder(options);try{return parseJsonConstructed(text,options,builder);}catch(error){builder.abort();throw error;}
  }
  stringify(value,options={}){return stringifyJsonValue(value,options,jsonBoundaryBudget(options));}
+ stringifyCompiled(codec,handle,options={}){
+  const limits=checkedJsonLimits(options),unwrap=options.unwrapResult===true;
+  let codecs=jsonCompiledRenderers.get(this);if(!codecs)jsonCompiledRenderers.set(this,codecs=new WeakMap());
+  let renderers=codecs.get(codec);if(!renderers)codecs.set(codec,renderers=new Map());
+  let render=renderers.get(unwrap);if(!render)renderers.set(unwrap,render=compiledJsonRenderer(this,codec,unwrap));
+  let bytes=0;const context={add(text){bytes+=jsonUtf8Length(text);if(bytes>limits.bytes)throw Error('JSON byte limit');return text;}};
+  const text=render(handle,context,limits);
+  return text;
+ }
  fromJS(value,options={}){return jsonFromJS(value,options);}
  toJS(value,options={}){return jsonToJS(value,options);}
  parseBinary(text,options={}){return streamJsonBinary(this.values,text,options,false);}
