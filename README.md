@@ -236,6 +236,9 @@ Both forward writers expose `beginCount()` / `endCount(offset, count)`. The comp
 writer reserves one prefix byte and grows it to the canonical count only after
 the sequence is complete; limits apply to final byte size, with no five-byte
 temporary prefix requirement. Every `frame` charges a node and depth, and
-`encodeWith` additionally validates complete schema conformance. Callback failure
+`encodeWith` additionally validates complete schema conformance. Literal generated
+writers may use balanced `openFrame()` / `closeFrame(offset)` calls to avoid
+allocating callbacks at each node; these charge the same limits and unfinished
+frames reject. Any exception abandons that writer invocation. Callback failure
 or reentry cannot reuse a partially active writer. Prefix insertion and record
 permutation are trusted bounded byte operations, not algebraic rewrite authority.

@@ -566,6 +566,10 @@ class WireEncoder{
   const extra=bytes.length-removed,end=extra>0?this.#reserve(extra):this.#at+extra;
   this.#data.copyWithin(at+bytes.length,at+removed,this.#at);this.#data.set(bytes,at);this.#at=end;
  }
+ // Literal generated writers use balanced frames without per-node callbacks.
+ // An exception abandons this invocation; encodeWith never reuses its writer.
+ openFrame(){if(this.#depth>this.#depthLimit||--this.#remaining<0)throw Error('wire node or depth limit');const at=this.beginNode();this.#depth++;return at;}
+ closeFrame(at){if(this.#depth===0)throw Error('wire frame boundary');this.#depth--;this.endNode(at);}
  frame(emit){if(this.#depth>this.#depthLimit||--this.#remaining<0)throw Error('wire node or depth limit');const at=this.beginNode();this.#depth++;try{emit(this);}finally{this.#depth--;}this.endNode(at);}
  reorder(start,spans){
   const sorted=spans.slice().sort((a,b)=>a[0]-b[0]);let at=start;
@@ -574,7 +578,7 @@ class WireEncoder{
   if(spans.every((s,i)=>s===sorted[i]))return;
   const copy=this.#data.slice(start,this.#at);at=start;for(const [a,b] of spans){this.#data.set(copy.subarray(a-start,b-start),at);at+=b-a;}
  }
- finish(){return this.#data.slice(0,this.#at);}
+ finish(){if(this.#depth!==0)throw Error('wire frame boundary');return this.#data.slice(0,this.#at);}
 }
 
 class CompactWireEncoder extends WireEncoder{
