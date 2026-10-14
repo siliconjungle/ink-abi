@@ -200,6 +200,20 @@ pub fn features(v: &Value) -> Result<Value, String> {
 }
 
 pub fn request(v: &Value) -> Result<Value, String> {
+    if v["operation"] == "usage-summary" {
+        let events: Vec<crate::usage::Event> =
+            serde_json::from_value(v["events"].clone()).map_err(|e| e.to_string())?;
+        let summary = crate::usage::summarize(&events, v["overflow"].as_bool().unwrap_or(false))?;
+        let previous: Option<crate::usage::Summary> = if v["previous"].is_null() {
+            None
+        } else {
+            Some(serde_json::from_value(v["previous"].clone()).map_err(|e| e.to_string())?)
+        };
+        let drift = previous
+            .as_ref()
+            .and_then(|p| crate::usage::drift(p, &summary));
+        return Ok(json!({"summary":summary,"operation_mix_drift":drift}));
+    }
     if v["operation"] == "adaptive-state" {
         let request = serde_json::from_value(v["request"].clone()).map_err(|e| e.to_string())?;
         return serde_json::to_value(crate::adaptive::decide(&request)?).map_err(|e| e.to_string());

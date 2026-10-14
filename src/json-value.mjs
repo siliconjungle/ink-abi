@@ -441,3 +441,56 @@ function streamWireJsonText(values,bytes,options,library){
  };
  if(library)json(values.descriptor.root,40,0);else typed(values.descriptor.root,40,0);return parts.join('');
 }
+
+/** Owned, optional read view of arbitrary JSON. Auxiliary indexes contain member
+ * offsets only. Logical order, exact number tokens and missing/null remain intact.
+ * This does not transparently replace any compiled Ink action or its state.
+ */
+export function createJsonLookup(text,{stepEntries=16,minReads=4,maxEntries=4096,maxObjects=64,maxIndexBytes=262144,...limits}={}){
+ for(const [v,max]of [[stepEntries,4096],[minReads,1000000],[maxEntries,1000000],[maxObjects,256],[maxIndexBytes,16777216]])if(!Number.isSafeInteger(v)||v<0||v>max)throw Error('JSON index budget');
+ let root=parseJson(text,limits),indexes=new Map(),entries=0,indexBytes=0;
+ const stats={reads:0,writes:0,scanned_members:0,index_hits:0,built_entries:0,invalidations:0};
+ function parts(path){if(!Array.isArray(path)||path.length>128||Array.from(path).some(p=>!(typeof p==='string'&&p.isWellFormed()&&p.length<=4096)&&!(Number.isSafeInteger(p)&&p>=0)))throw Error('JSON lookup path');return path.slice();}
+ function variant(value){let p=value.payload,index=0;while(index<5&&Object.hasOwn(p,'Err')){p=p.Err;index++;}return {index,item:(index<5?p.Ok:p).item0};}
+ function resolve(document,path,indexed){
+  let value=document,budget=stepEntries;
+  for(let depth=0;depth<path.length;depth++){
+   const part=path[depth],v=variant(value);
+   if(typeof part==='number'){
+    if(v.index!==4)throw Error('expected JSON array');if(part>=v.item.length)return {found:false};value=v.item[part];continue;
+   }
+   if(v.index!==5)throw Error('expected JSON object');
+   const prefix=path.slice(0,depth),key=JSON.stringify(prefix),overhead=128+prefix.reduce((n,p)=>n+(typeof p==='string'?16+p.length*2:8),0);let idx=indexed?indexes.get(key):null;
+   if(indexed&&!idx&&indexes.size<maxObjects&&indexBytes+overhead<=maxIndexBytes){idx={path:prefix,reads:0,cursor:0,keys:new Map(),bytes:overhead};indexes.set(key,idx);indexBytes+=overhead;}
+   if(idx){
+    idx.reads++;
+    if(idx.reads>=minReads)while(budget>0&&idx.cursor<v.item.length&&entries<maxEntries){
+     const member=v.item[idx.cursor],bytes=64+member.key.length*2;
+     if(indexBytes+bytes>maxIndexBytes)break;
+     idx.keys.set(member.key,idx.cursor++);idx.bytes+=bytes;indexBytes+=bytes;entries++;stats.built_entries++;budget--;
+    }
+    if(idx.keys.has(part)){stats.index_hits++;value=v.item[idx.keys.get(part)].value;continue;}
+   }
+   let found=false;
+   for(let i=idx?.cursor??0;i<v.item.length;i++){if(indexed)stats.scanned_members++;if(v.item[i].key===part){value=v.item[i].value;found=true;break;}}
+   if(!found)return {found:false};
+  }
+  return {found:true,value};
+ }
+ return {
+  lookup(path){stats.reads++;const r=resolve(root,parts(path),true);return r.found?{found:true,value:structuredClone(r.value)}:r;},
+  set(path,key,text){
+   path=parts(path);if(typeof key!=='string'||!key.isWellFormed())throw Error('JSON object key');
+   const replacement=parseJson(text,limits),next=structuredClone(root),r=resolve(next,path,false);
+   if(!r.found)throw Error('JSON update path missing');const object=variant(r.value);if(object.index!==5)throw Error('expected JSON object');
+   const members=[{key,value:replacement},...object.item.filter(m=>m.key!==key)];
+   // Validate the complete resulting document before publishing a write.
+   let payload=r.value.payload;for(let i=0;i<5;i++)payload=payload.Err;payload.item0=members;
+   stringifyJson(next,limits);root=next;stats.writes++;
+   for(const [id,idx]of indexes)if(idx.path.length>=path.length&&path.every((p,i)=>p===idx.path[i])){entries-=idx.keys.size;indexBytes-=idx.bytes;indexes.delete(id);stats.invalidations++;}
+  },
+  replace(text){const next=parseJson(text,limits);root=next;stats.writes++;stats.invalidations+=indexes.size;indexes.clear();entries=0;indexBytes=0;},
+  stringify(){return stringifyJson(root,limits);},
+  stats(){return {...stats,index_entries:entries,index_objects:indexes.size,index_bytes:indexBytes};}
+ };
+}
