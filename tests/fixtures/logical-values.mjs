@@ -460,3 +460,27 @@ for(const compact of [false,true]){
  assert.deepEqual(writer.encodeWith(w=>{const at=w.openFrame();w.closeFrame(at);}),writer.encode(null));
 }
 console.log('balanced literal frames preserve bytes, resource failures and recovery');
+
+// Direct numeric word emission retains exact rounding, signed zero, boundaries
+// and byte/node/depth diagnostics, including failed and subsequent calls.
+for(const kind of ['f32','u32','i32','u64']){
+ const codec=new TypedJsonCodec(await createValueCodec({kind}));
+ for(const text of ['-0','0','1','-1','4294967295','4294967296','-2147483648','-2147483649','18446744073709551615','18446744073709551616','1.401298464324817e-45','7e-46','-7e-46','3.4028234663852886e38','3.4028236e38','1e-1000','1e1000']){
+  const valid=outcome(()=>codec.parse(text));
+  for(const compact of [false,true]){
+   const emit=limits=>compact?codec.parseCompact(text,limits):codec.parseBinary(text,limits);
+   assert.equal(outcome(()=>emit()),valid,kind+' '+text);
+   if(valid){
+    const expected=(compact?codec.values.compact():codec.values).encode(codec.parse(text));
+    assert.deepEqual(emit(),expected);
+    for(const limits of [{nodes:0},{depth:0},{bytes:expected.length},{bytes:expected.length-1}]){
+     // Text ingress and encoded output each obey the declared byte limit.
+     const inputFits=limits.bytes===undefined||Buffer.byteLength(text)<=limits.bytes;
+     assert.equal(outcome(()=>emit(limits)),inputFits&&outcome(()=>(compact?codec.values.compact():codec.values).encode(codec.parse(text),limits)));
+    }
+   }
+  }
+ }
+ assert.deepEqual(codec.parseBinary('0'),codec.values.encode(codec.parse('0')));
+}
+console.log('direct typed numeric words preserve exact values and resource failures');
