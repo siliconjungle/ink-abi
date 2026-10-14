@@ -242,3 +242,15 @@ allocating callbacks at each node; these charge the same limits and unfinished
 frames reject. Any exception abandons that writer invocation. Callback failure
 or reentry cannot reuse a partially active writer. Prefix insertion and record
 permutation are trusted bounded byte operations, not algebraic rewrite authority.
+
+`ink_abi::usage` computes bounded access summaries (locality, sizes, operation
+mixes, invalidations and phase drift); browser callers use the same Rust through
+`selectionRequest({operation: 'usage-summary', events, previous, overflow})`.
+These sampled diagnostics contain no raw payloads and grant no proof authority.
+
+`json_lookup::Lookup` and JavaScript `createJsonLookup` provide optional owned JSON
+read views with incremental member-offset indexes. They preserve exact tokens,
+order, missing/null and failed-update atomicity. Explicit `set` invalidates only
+indexes at/below its object; a root replacement clears all. Entry/charged-byte
+budgets and per-lookup construction work are bounded; charged bytes are not a
+heap measurement. They do not replace compiled source actions.
