@@ -26,14 +26,14 @@ const samples=[
  {node:{text:'雪😀',next:{Some:{text:'\ufeff',next:{None:null}}}},counts:[0,4294967295],mode:'On',id:'0'.repeat(32),big:{Int:'-123456789012345678901234567890'},signed:-2147483648,float:{F32Bits:0x7fc12345},flag:true,unit:null,reply:{Ok:18446744073709551615n}},
  {node:{text:'',next:{None:null}},counts:[1,2],mode:'Off',id:'abcdef0123456789abcdef0123456789',big:{Int:'0'},signed:2147483647,float:{F32Bits:0x80000000},flag:false,unit:null,reply:{Err:'error'}},
 ];
-const outcome=run=>{try{return {ok:true,value:run()};}catch{return {ok:false};}};
+const outcome=run=>{try{return {ok:true,value:run()};}catch(error){return {ok:false,name:error.name,message:error.message};}};
 let checks=0;
 for(const compact of [false,true]){
  const baseline=compact?oracle.compact():oracle,selected=compact?fused.compact():fused;
  for(const sample of samples){
   const bytes=baseline.encode(sample);
   const compare=(input,limits={})=>{
-   assert.deepEqual(outcome(()=>selected.decode(input,limits)),outcome(()=>baseline.decode(input,limits)));
+   assert.deepEqual(outcome(()=>selected.decode(input,limits)),outcome(()=>{baseline.validate(input,limits);return baseline.decode(input,limits);}));
    checks++;
   };
   compare(bytes);const owned=selected.decode(bytes);bytes.fill(0);assert.deepEqual(owned,sample);
@@ -48,6 +48,6 @@ for(const compact of [false,true]){
 // Canonical compact counts must fail identically, even when the decoded size fits.
 const strings=await createValueCodec(scalar('string')),fusedStrings=createFusedValueCodec(strings.descriptor,text);
 for(const bytes of [Uint8Array.of(1,129,0,65),Uint8Array.of(1,128,128,128,128,16),Uint8Array.of(1,1,255)]){
- assert.deepEqual(outcome(()=>fusedStrings.compact().decode(bytes)),outcome(()=>strings.compact().decode(bytes)));
+ assert.deepEqual(outcome(()=>fusedStrings.compact().decode(bytes)),outcome(()=>{strings.compact().validate(bytes);return strings.compact().decode(bytes);}));
 }
 console.log(checks,'fused-reader outcomes agree with independent decoding, corruptions, truncations, limits and detached outputs');

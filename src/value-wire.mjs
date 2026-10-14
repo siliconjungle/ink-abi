@@ -712,8 +712,7 @@ function literalValueHeader(identity){
  return words;
 }
 class CheckedLiteralValueReader {
- constructor(bytes,header,compact,options){
-  const limits=wireLimits(options);
+ constructor(bytes,header,compact,limits){
   if(!(bytes instanceof Uint8Array)||typeof SharedArrayBuffer==='function'&&bytes.buffer instanceof SharedArrayBuffer||bytes.length<(compact?1:44)||bytes.length>limits.bytes)throw Error('wire byte limit or header');
   const view=new DataView(bytes.buffer,bytes.byteOffset,bytes.byteLength);
   if(compact){if(bytes[0]!==1)throw Error('compact format mismatch');}
@@ -765,12 +764,20 @@ class CheckedLiteralValueReader {
 class FusedCompactValueCodec extends CompactValueCodec {
  #read;
  constructor(source,read){super(source);this.#read=read;}
- decode(bytes,options=wireDefaultOptions){const reader=new CheckedLiteralValueReader(bytes,null,true,options),value=this.#read(reader);reader.complete();return value;}
+ decode(bytes,options=wireDefaultOptions){
+  const limits=wireLimits(options);
+  try{const reader=new CheckedLiteralValueReader(bytes,null,true,limits),value=this.#read(reader);reader.complete();return value;}
+  catch(error){super.validate(bytes,limits);throw error;}
+ }
 }
 class FusedValueCodec extends ValueCodec {
  #read;#header;#fusedCompact=null;
  constructor(descriptor,read){super(descriptor);this.#read=read;this.#header=literalValueHeader(this.descriptor.identity);}
- decode(bytes,options=wireDefaultOptions){const reader=new CheckedLiteralValueReader(bytes,this.#header,false,options),value=this.#read(reader);reader.complete();return value;}
+ decode(bytes,options=wireDefaultOptions){
+  const limits=wireLimits(options);
+  try{const reader=new CheckedLiteralValueReader(bytes,this.#header,false,limits),value=this.#read(reader);reader.complete();return value;}
+  catch(error){super.validate(bytes,limits);throw error;}
+ }
  compact(){return this.#fusedCompact??=new FusedCompactValueCodec(this,this.#read);}
 }
 export function createFusedValueCodec(descriptor,read){if(typeof read!=='function')throw Error('compiled value reader required');return new FusedValueCodec(descriptor,read);}
