@@ -450,7 +450,10 @@ export function createJsonLookup(text,{stepEntries=16,minReads=4,maxEntries=4096
  for(const [v,max]of [[stepEntries,4096],[minReads,1000000],[maxEntries,1000000],[maxObjects,256],[maxIndexBytes,16777216]])if(!Number.isSafeInteger(v)||v<0||v>max)throw Error('JSON index budget');
  let root=parseJson(text,limits),indexes=new Map(),entries=0,indexBytes=0;
  const stats={reads:0,writes:0,scanned_members:0,index_hits:0,built_entries:0,invalidations:0};
- function parts(path){if(!Array.isArray(path)||path.length>128||Array.from(path).some(p=>!(typeof p==='string'&&p.isWellFormed()&&p.length<=4096)&&!(Number.isSafeInteger(p)&&p>=0)))throw Error('JSON lookup path');return path.slice();}
+ function parts(path){
+  if(!Array.isArray(path))throw Error('JSON lookup path');const n=path.length;if(n>128)throw Error('JSON lookup path');
+  const owned=[];for(let i=0;i<n;i++){const d=Object.getOwnPropertyDescriptor(path,String(i));if(!d||!Object.hasOwn(d,'value'))throw Error('JSON lookup path');const p=d.value;if(!(typeof p==='string'&&p.isWellFormed()&&p.length<=4096)&&!(Number.isSafeInteger(p)&&p>=0))throw Error('JSON lookup path');owned.push(p);}return owned;
+ }
  function variant(value){let p=value.payload,index=0;while(index<5&&Object.hasOwn(p,'Err')){p=p.Err;index++;}return {index,item:(index<5?p.Ok:p).item0};}
  function resolve(document,path,indexed){
   let value=document,budget=stepEntries;

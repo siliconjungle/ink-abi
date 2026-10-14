@@ -66,6 +66,8 @@ fn incremental_owned_json_index_preserves_exact_values_and_local_invalidations()
  const saved=v.stringify();assert.throws(()=>v.set(['a'],'bad','{"x":1,"x":2}'));assert.equal(v.stringify(),saved);
  const detached=v.lookup(['a']).value;detached.payload={};assert.equal(v.stringify(),saved);
  assert.throws(()=>v.lookup(['__proto__','x']),/object/);v.replace('[null,123]');assert.equal(stringifyJson(v.lookup([0]).value),'null');assert.equal(v.lookup([2]).found,false);
+ const accessor=[];Object.defineProperty(accessor,'0',{get(){throw Error('must not invoke');}});assert.throws(()=>v.lookup(accessor),/JSON lookup path/);
+ const noIterator=[0];noIterator[Symbol.iterator]=()=>{throw Error('must not iterate');};assert.equal(stringifyJson(v.lookup(noIterator).value),'null');assert.throws(()=>v.lookup(new Array(1)),/JSON lookup path/);
  "#).unwrap();
     let run = std::process::Command::new("node")
         .arg(dir.join("run.mjs"))
