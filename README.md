@@ -1,8 +1,8 @@
 # Ink ABI
 
-One transport contract for Ink's C, Rust, JavaScript, Wasm and GPU backends.
+One transport contract for Ink's Rust, JavaScript, Wasm and GPU backends.
 
-`ink-abi` owns value descriptors, packed numeric layouts, the C value/state headers,
+`ink-abi` owns value descriptors and packed numeric layouts,
 and host execution decisions. It has no compiler or knowledge-store dependency.
 Every backend pins this repository. Generated hosts consume its exported sources.
 
@@ -28,12 +28,6 @@ Run `cargo test --locked` with Node available. To rebuild browser decisions, ins
 `wasm32-unknown-unknown` and run `tools/build-selection.sh`. The committed Wasm and
 source fingerprint travel together; CI checks the fingerprint, tests that artifact,
 then rebuilds and repeats conformance. A compiler upgrade may change Wasm bytes.
-
-The literal C value ABI includes invocation-local frame tokens. Finishing a frame
-retains one returned handle and all handles from before its mark, and discards
-other transient handles. Tokens are private to emitted code; callers must not
-retain discarded handles. Frames do not change table state, events, journals or
-logical snapshot types. Operational implementations remain trusted.
 
 ## License
 
@@ -119,7 +113,7 @@ Structural admission does not establish JSON number grammar or unique members.
 `JsonCodec.fromJS(value, limits)` captures a plain JavaScript object tree as the
 existing library `Json` datatype without serializing or parsing JSON text.
 `JsonCodec.toJS(value, options)` returns fresh plain objects and arrays. These
-methods are opt-in JavaScript adapters: native Rust/C/Wasm codecs, source types,
+methods are opt-in JavaScript adapters: native Rust/Rust/Wasm codecs, source types,
 wire formats, pure calls and state execution are unchanged. Existing paths do
 not invoke the adapters or allocate their traversal state.
 

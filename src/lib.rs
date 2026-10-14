@@ -2,8 +2,6 @@
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::collections::BTreeSet;
-pub const STATE_C_HEADER: &str = include_str!("state-abi.h");
-pub const VALUES_C_HEADER: &str = include_str!("values.h");
 pub const PACKED_JS_SOURCE: &str = include_str!("packed.mjs");
 pub const VALUE_ABI: &str = "ink-values-v1";
 pub const MAX_TYPE_DEPTH: usize = 32;
