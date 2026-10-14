@@ -192,7 +192,7 @@ try{assert.deepEqual(float.capture(0),{F32Bits:0});}finally{delete Object.protot
 
 // JSON construction/rendering may fuse schema checking only when the complete
 // recursive schema agrees. Compare acceptance with the separate general checker.
-const {JsonCodec,TypedJsonCodec,parseJson,stringifyJson}=await import('./json-value.mjs');
+const {JsonCodec,TypedJsonCodec,parseJson,stringifyJson,createJsonQuoter}=await import('./json-value.mjs');
 const ref={kind:'ref',name:'Json'},record=(name,type)=>({kind:'record',name,fields:type?[{name:'item0',type}]:[]});
 const member={kind:'record',name:'Member',fields:[{name:'key',type:scalar('string')},{name:'value',type:ref}]};
 const branches=[record('Null'),record('Bool',scalar('bool')),record('Number',scalar('string')),record('String',scalar('string')),record('Array',{kind:'list',element:ref}),record('Object',{kind:'list',element:member})];
@@ -484,3 +484,16 @@ for(const kind of ['f32','u32','i32','u64']){
  assert.deepEqual(codec.parseBinary('0'),codec.values.encode(codec.parse('0')));
 }
 console.log('direct typed numeric words preserve exact values and resource failures');
+
+// Quotation caching retains immutable strings only and obeys both declared caps.
+for(const config of [{maxEntries:0,maxBytes:0},{maxEntries:2,maxBytes:128},{maxEntries:4,maxBytes:8}]){
+ const q=createJsonQuoter(config);assert.ok(Object.isFrozen(q));
+ for(let repeat=0;repeat<3;repeat++)for(const key of ['x','雪😀','__proto__','\\\"\n','12345678901234567890']){
+  assert.equal(q.quote(key),JSON.stringify(key));const s=q.stats();assert.ok(s.entries<=config.maxEntries);assert.ok(s.payload_bytes<=config.maxBytes);
+  const token=q.token(key);assert.ok(Object.isFrozen(token));assert.equal(token.text,JSON.stringify(key));assert.equal(token.utf8Bytes,new TextEncoder().encode(token.text).length);
+ }
+ q.clear();assert.equal(q.stats().entries,0);assert.equal(q.stats().payload_bytes,0);
+ assert.throws(()=>q.quote('\ud800'),/invalid JSON String/);assert.throws(()=>q.quote({toString(){throw Error('coercion');}}),/invalid JSON String/);
+}
+for(const config of [{maxEntries:-1},{maxEntries:65537},{maxEntries:1.5},{maxBytes:-1},{maxBytes:16777217}])assert.throws(()=>createJsonQuoter(config),/budget/);
+console.log('bounded immutable JSON quotation retains values and explicit cache caps');

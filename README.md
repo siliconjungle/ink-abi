@@ -180,6 +180,21 @@ Err; this option does not turn a failed action into a successful one. The codec
 must match the exact JSON schema. This explicit adapter leaves ordinary
 `stringify` calls unchanged; lifecycle measurements determine profitability.
 
+An optional `createJsonQuoter({maxEntries, maxBytes})` reuses escaped immutable
+strings and their exact UTF-8 lengths. Pass a quoter from the same module as
+`{quoter}` to `stringifyCompiled`. Source validation, duplicates, member order,
+exact numeric tokens and output budgets still apply on every call, including
+hits. `quote(string)` returns text; `token(string)` returns a frozen
+`{text, utf8Bytes}` pair. `clear()` releases retained entries and `stats()` reports
+entries, estimated payload bytes, hits and misses. Entry caps also bound separate
+container overhead; the payload estimate is not a measured process-heap limit.
+
+The cache is explicit and no default selects it. A repeated Unicode-rendering
+experiment saved about 21–24% over complete 256-render sessions including cache
+construction and first fill; short sessions, numeric data and cold renders were
+mixed or slower. These observations are specific to the recorded workload and
+shared host. Profile the full lifecycle and retained memory before choosing it.
+
 ### Agreed-schema JavaScript transport
 
 `valueCodec.compact()` returns a cached `CompactValueCodec` with the exact same

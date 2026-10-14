@@ -17,6 +17,31 @@ const jsonWireEncoder=new TextEncoder();
 const jsonFloatScratch=new DataView(new ArrayBuffer(4));
 function jsonUtf8Length(text){if(text.length>16&&!/[^\x00-\x7f]/.test(text))return text.length;let bytes=0;for(let i=0;i<text.length;i++){const c=text.charCodeAt(i);if(c<128)bytes++;else if(c<2048)bytes+=2;else if(c>=0xd800&&c<=0xdbff){bytes+=4;i++;}else bytes+=3;}return bytes;}
 const jsonLimits={bytes:16777216,nodes:1000000,depth:128};
+const jsonQuoters=new WeakSet();
+/** Explicit, bounded reuse of immutable JSON string quotes. Cache payload bytes
+ * are UTF-16 storage estimates; entry caps bound separate Map/object overhead.
+ * Logical output budgets are charged again on every use, including cache hits.
+ */
+export function createJsonQuoter({maxEntries=1024,maxBytes=131072}={}){
+ if(!Number.isSafeInteger(maxEntries)||maxEntries<0||maxEntries>65536||!Number.isSafeInteger(maxBytes)||maxBytes<0||maxBytes>16777216)throw Error('JSON quote cache budget');
+ const entries=new Map();let bytes=0,hits=0,misses=0;
+ const token=value=>{
+  const prior=entries.get(value);if(prior!==undefined){hits++;return prior;}
+  if(typeof value!=='string'||!value.isWellFormed())throw Error('invalid JSON String');
+  misses++;const text=JSON.stringify(value),size=2*(value.length+text.length),quoted=Object.freeze({text,utf8Bytes:jsonUtf8Length(text)});
+  if(maxEntries&&size<=maxBytes){
+   while(entries.size&&(entries.size>=maxEntries||bytes+size>maxBytes)){const key=entries.keys().next().value;bytes-=2*(key.length+entries.get(key).text.length);entries.delete(key);}
+   entries.set(value,quoted);bytes+=size;
+  }
+  return quoted;
+ };
+ const quoter=Object.freeze({
+  token,
+  quote(value){return token(value).text;},
+  clear(){entries.clear();bytes=0;},
+  stats(){return {entries:entries.size,payload_bytes:bytes,hits,misses};},
+ });jsonQuoters.add(quoter);return quoter;
+}
 function checkedJsonLimits(options){const l={...jsonLimits,...options};for(const k of ['bytes','nodes','depth'])if(!Number.isSafeInteger(l[k])||l[k]<0||l[k]>jsonLimits[k])throw Error('JSON hard resource limit');return l;}
 function jsonVariant(index,item){let payload=index===0?{}:{item0:item};if(index<5)payload={Ok:payload};for(let i=0;i<index;i++)payload={Err:payload};return {payload};}
 export function parseJson(text,options={}){return parseJsonValue(text,options,null);}
@@ -219,13 +244,13 @@ function compiledJsonRenderer(json,codec,unwrap){
   if(node.kind==='record'){
    if(role==='root')return value=>value;
    if(role==='member')return (key,value,context)=>{
-    const text=context.add(JSON.stringify(key)+':')+value,seen=context.members;
+    const text=(context.quoter?context.quote(key,true):context.add(JSON.stringify(key)+':'))+value,seen=context.members;
     if(seen.has(key))throw Error('duplicate JSON object key');seen.add(key);return text;
    };
    if(role===0)return context=>context.add('null');
    if(role===1)return (value,context)=>context.add(value?'true':'false');
    if(role===2)return (token,context)=>{if(!jsonNumberToken(token))throw Error('invalid JSON number');return context.add(token);};
-   if(role===3)return (value,context)=>context.add(JSON.stringify(value));
+   if(role===3)return (value,context)=>context.quoter?context.quote(value,false):context.add(JSON.stringify(value));
    if(role===4)return (value,context)=>{context.add('[]');return '['+value+']';};
    if(role===5)return (value,context)=>{context.add('{}');return '{'+value+'}';};
    return ()=>null;
@@ -270,10 +295,18 @@ export class JsonCodec{
  stringify(value,options={}){return stringifyJsonValue(value,options,jsonBoundaryBudget(options));}
  stringifyCompiled(codec,handle,options={}){
   const limits=checkedJsonLimits(options),unwrap=options.unwrapResult===true;
+  const quoter=options.quoter;if(quoter!==undefined&&!jsonQuoters.has(quoter))throw Error('JSON quote cache owner mismatch');
   let codecs=jsonCompiledRenderers.get(this);if(!codecs)jsonCompiledRenderers.set(this,codecs=new WeakMap());
   let renderers=codecs.get(codec);if(!renderers)codecs.set(codec,renderers=new Map());
   let render=renderers.get(unwrap);if(!render)renderers.set(unwrap,render=compiledJsonRenderer(this,codec,unwrap));
-  let bytes=0;const context={add(text){bytes+=jsonUtf8Length(text);if(bytes>limits.bytes)throw Error('JSON byte limit');return text;}};
+  let bytes=0;const context={
+   quoter,
+   add(text){bytes+=jsonUtf8Length(text);if(bytes>limits.bytes)throw Error('JSON byte limit');return text;},
+   quote(value,colon){
+    if(!quoter)return this.add(JSON.stringify(value)+(colon?':':''));
+    const token=quoter.token(value);bytes+=token.utf8Bytes+(colon?1:0);if(bytes>limits.bytes)throw Error('JSON byte limit');return token.text+(colon?':':'');
+   },
+  };
   const text=render(handle,context,limits);
   return text;
  }
