@@ -239,6 +239,11 @@ fn typed_node(
                         _ => w.bytes(token.as_bytes())?,
                     }
                 }
+                ("f64", Json::Number(v)) => {
+                    let n=v.parse::<f64>().map_err(|_|"JSON f64")?;
+                    if !n.is_finite(){return Err("JSON f64 overflow".into());}
+                    w.bytes(&n.to_bits().to_le_bytes())?;
+                }
                 ("f32", Json::Number(v)) => {
                     let f = v.parse::<f32>().map_err(|_| "JSON f32")?;
                     if !f.is_finite() {
@@ -368,6 +373,11 @@ fn typed_write(
         "u64" => out.emit(&u64::from_le_bytes(v.body()?.try_into().unwrap()).to_string()),
         "i32" => out.emit(&i32::from_le_bytes(v.body()?.try_into().unwrap()).to_string()),
         "int" => out.emit(v.text()?),
+        "f64" => {
+            let n=f64::from_le_bytes(v.body()?.try_into().unwrap());
+            if !n.is_finite(){return Err("non-finite f64 cannot encode as JSON".into());}
+            out.emit(if n==0.0&&n.is_sign_negative(){"-0".into()}else{n.to_string()}.as_str())
+        }
         "f32" => {
             let f = f32::from_le_bytes(v.body()?.try_into().unwrap());
             if !f.is_finite() {

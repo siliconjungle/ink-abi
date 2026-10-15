@@ -84,6 +84,11 @@ impl TypedJsonCodec {
                     json!(integer(v, 10)?.parse::<i32>().map_err(|_| error())?)
                 }
                 ("int", Json::Number(v)) => json!({"Int":integer(v,4096)?}),
+                ("f64", Json::Number(v)) => {
+                    let n=v.parse::<f64>().map_err(|_|error())?;
+                    if !n.is_finite(){return Err("JSON f64 overflow".into());}
+                    crate::float64::raw(n.to_bits())
+                }
                 ("f32", Json::Number(v)) => {
                     let f = v.parse::<f32>().map_err(|_| error())?;
                     if !f.is_finite() {
@@ -168,6 +173,11 @@ impl TypedJsonCodec {
                         .unwrap_or_else(|| v.to_string()),
                 ),
                 "int" => Json::Number(v["Int"].as_str().unwrap().into()),
+                "f64" => {
+                    let n=f64::from_bits(crate::float64::bits(v)?);
+                    if !n.is_finite(){return Err("non-finite f64 cannot encode as JSON".into());}
+                    Json::Number(if n==0.0&&n.is_sign_negative(){"-0".into()}else{n.to_string()})
+                }
                 "f32" => {
                     let f = if let Some(n) = v.as_f64() {
                         n as f32

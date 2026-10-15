@@ -5,6 +5,7 @@ use std::collections::BTreeSet;
 pub const PACKED_JS_SOURCE: &str = include_str!("packed.mjs");
 pub const VALUE_ABI: &str = "ink-values-v1";
 pub const MAX_TYPE_DEPTH: usize = 32;
+pub mod float64;
 
 pub fn describe<T: Serialize, R: Serialize, E: Serialize, I: Serialize>(
     ty: &T,
@@ -39,6 +40,7 @@ fn describe_json(
             "U64" => "u64",
             "I32" => "i32",
             "F32" => "f32",
+            "F64" => "f64",
             "Bool" => "bool",
             "Unit" => "unit",
             "String" => "string",
@@ -119,7 +121,7 @@ fn width(t: &Value, depth: usize) -> Result<usize, String> {
                 n.checked_add(width(&f["type"], depth + 1)?)
                     .ok_or("packed width overflow".into())
             }),
-        "u64" => Ok(2),
+        "u64" | "f64" => Ok(2),
         "u32" | "i32" | "f32" | "bool" => Ok(1),
         _ => {
             Err("packed compute values must be flat numeric, Bool, vector or record values".into())
@@ -133,7 +135,7 @@ fn validate_flat(t: &Value, depth: usize) -> Result<(), String> {
     }
     match t["kind"].as_str() {
         Some("u32" | "i32" | "f32" | "bool") => Ok(()),
-        Some("u64") => Ok(()),
+        Some("u64" | "f64") => Ok(()),
         Some("vector") => {
             if t["size"].as_u64().is_none_or(|n| n == 0) {
                 return Err("invalid vector size".into());

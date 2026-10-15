@@ -5,6 +5,21 @@ use sha2::{Digest, Sha256};
 use std::collections::{BTreeMap, BTreeSet};
 pub const FORMAT: &str = "ink-value-wire-v1";
 pub const MAGIC: &[u8; 8] = b"INKVAL\0\x01";
+// Keep these helpers self-contained: this file is also embedded verbatim in
+// generated native applications without a dependency on the compiler or ABI.
+pub(crate) fn f64_bits(value:&Value)->Result<u64,String>{
+    if let Some(n)=value.as_f64(){
+        return if n.is_finite(){Ok(n.to_bits())}else{Err("non-finite f64 needs F64Bits".into())};
+    }
+    let o=value.as_object().ok_or("expected finite f64 or F64Bits")?;
+    if o.len()!=1{return Err("invalid F64Bits fields".into());}
+    let text=o.get("F64Bits").and_then(Value::as_str).ok_or("F64Bits needs an unsigned decimal string")?;
+    if text.is_empty()||text.len()>20||text.len()>1&&text.starts_with('0')||!text.bytes().all(|c|c.is_ascii_digit()){
+        return Err("invalid F64Bits decimal string".into());
+    }
+    text.parse().map_err(|_|"F64Bits outside u64 range".into())
+}
+pub(crate) fn f64_raw(bits:u64)->Value{json!({"F64Bits":bits.to_string()})}
 #[derive(Clone, Copy, Debug)]
 pub struct Limits {
     pub bytes: usize,
@@ -51,7 +66,7 @@ impl Schema {
             let obj = t.as_object().ok_or("invalid wire descriptor")?;
             let kind = t["kind"].as_str().ok_or("missing wire kind")?;
             let keys: &[&str] = match kind {
-                "u32" | "u64" | "i32" | "f32" | "bool" | "unit" | "string" | "int" => &["kind"],
+                "u32" | "u64" | "i32" | "f32" | "f64" | "bool" | "unit" | "string" | "int" => &["kind"],
                 "id" | "ref" => &["kind", "name"],
                 "enum" => &["kind", "name", "variants"],
                 "record" => &["kind", "name", "fields"],
@@ -388,6 +403,7 @@ fn encode(
             };
             out.extend(n.to_le_bytes());
         }
+        "f64" => out.extend(f64_bits(v)?.to_le_bytes()),
         "f32" => {
             let bits = if let Some(n) = v.as_f64() {
                 let f = n as f32;
@@ -550,6 +566,10 @@ fn walk(
                     }
                 }
             }
+        }
+        "f64" => {
+            if body.len()!=8{return Err(error());}
+            if materialize{f64_raw(u64::from_le_bytes(body.try_into().unwrap()))}else{Value::Null}
         }
         "u64" => {
             if body.len() != 8 {

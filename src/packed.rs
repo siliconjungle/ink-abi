@@ -63,6 +63,11 @@ pub fn pack(v: &Value, t: &Value) -> Result<Data> {
                 w.push(n as u32);
                 w.push((n >> 32) as u32);
             }
+            "f64" => {
+                let bits=crate::float64::bits(v)?;
+                *finite &= f64::from_bits(bits).is_finite();
+                w.push(bits as u32);w.push((bits>>32)as u32);
+            }
             "f32" => {
                 let bits = if let Some(n) = v.as_f64() {
                     let f = n as f32;
@@ -143,6 +148,10 @@ pub fn unpack(d: &Data, t: &Value) -> Value {
                 } else {
                     json!(n)
                 }
+            }
+            "f64" => {
+                let bits=w[*i]as u64|((w[*i+1]as u64)<<32);*i+=2;
+                crate::float64::value(bits)
             }
             k => {
                 let n = w[*i];

@@ -35,8 +35,9 @@ pub fn pack_flat(value: Validated<'_>) -> Result<crate::packed::Data, String> {
                 }
             }
             "bool" => words.push(u32::from(v.body()?[0])),
-            "u64" => {
+            "u64" | "f64" => {
                 let body = v.body()?;
+                if v.kind()?=="f64"{*finite &= f64::from_le_bytes(body.try_into().map_err(|_|"binary64 wire width")?).is_finite();}
                 words.push(word(body, 0)?);
                 words.push(word(body, 4)?);
             }

@@ -8,11 +8,18 @@ Every backend pins this repository. Generated hosts consume its exported sources
 
 * Records use declaration-order fields; vectors use element order. Packed values
   use little-endian 32-bit words, with low/high words for `u64` and exact IEEE bits
-  for `f32`. Lists carry a separate element count. Nested variable-length values
+  for `f32`; binary64 `f64` uses two words retaining all 64 IEEE bits. Lists carry a separate element count. Nested variable-length values
   use tagged value transport rather than the flat compute layout.
 * `describe` derives one descriptor from the checked type environment.
   `flat_width` checks target eligibility. Native and JavaScript packing implement
   these descriptors and share conformance fixtures, including malformed inputs.
+* The `f64` descriptor accepts finite numeric carriers or exact
+  `{"F64Bits":"unsigned decimal u64"}` tags. Checked tags reject numeric bit
+  payloads, noncanonical decimal strings and extra fields. Wire transport always
+  materializes exact bit tags; ordinary packed materialization may return finite
+  numbers. Typed JSON emits finite numeric values only and preserves negative
+  zero. The handle kind appends F64 at tag 9; older kinds retain their numbers.
+  This transport capability grants no GPU binary64 arithmetic or proof authority.
 * `selection::decide` is the only adaptive/static decision implementation. Browser
   hosts execute the same Rust through the included Wasm module. The common
   `features` function computes workload counts from transport/stage descriptors.

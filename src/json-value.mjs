@@ -332,6 +332,13 @@ function jsonInteger(token,limit){
  if(shift<0){const cut=-shift;if(cut>=digits.length||!/^[0]+$/.test(digits.slice(-cut)))throw Error('JSON number is not an integer');digits=digits.slice(0,-cut);}else{if(digits.length+shift>limit)throw Error('JSON integer magnitude limit');digits+='0'.repeat(shift);}
  digits=digits.replace(/^0+/,'');if(digits.length>limit)throw Error('JSON integer magnitude limit');return (negative?'-':'')+digits;
 }
+function jsonBinary64Value(v){
+ if(typeof v==='number')return v;
+ const text=v.F64Bits;
+ if(typeof text!=='string'||text.length>20||!/^(0|[1-9][0-9]*)$/.test(text))throw Error('invalid F64Bits');
+ const bits=BigInt(text);if(bits>18446744073709551615n)throw Error('invalid F64Bits');
+ const b=new DataView(new ArrayBuffer(8));b.setBigUint64(0,bits,true);return b.getFloat64(0,true);
+}
 export class TypedJsonCodec{
  constructor(valueCodec){this.values=valueCodec;}
  decode(document,options={}){
@@ -344,6 +351,7 @@ export class TypedJsonCodec{
     case 'unit':if(kind!==0)fail();return null;
     case 'bool':if(kind!==1)fail();return item;
     case 'u32':case 'u64':case 'i32':case 'int':{if(kind!==2)fail();const text=jsonInteger(item,t.kind==='int'?4096:t.kind==='u64'?20:10);return t.kind==='int'?{Int:text}:t.kind==='u64'?BigInt(text):Number(text);}
+    case 'f64':{if(kind!==2)fail();const n=Number(item),b=new DataView(new ArrayBuffer(8));if(!Number.isFinite(n))throw Error('JSON f64 overflow');b.setFloat64(0,n,true);return {F64Bits:b.getBigUint64(0,true).toString()};}
     case 'f32':{if(kind!==2)fail();const n=Number(item),b=new DataView(new ArrayBuffer(4));b.setFloat32(0,n,true);if(!Number.isFinite(b.getFloat32(0,true)))throw Error('JSON f32 overflow');return {F32Bits:b.getUint32(0,true)};}
     case 'string':case 'enum':case 'id':if(kind!==3)fail();return item;
     case 'list':case 'vector':if(kind!==4)fail();return item.map(x=>read(t.element,x,d+1));
@@ -363,6 +371,7 @@ export class TypedJsonCodec{
     case 'bool':return jsonVariant(1,v);
     case 'u32':case 'u64':case 'i32':return jsonVariant(2,String(v));
     case 'int':return jsonVariant(2,typeof v==='bigint'?String(v):v.Int);
+    case 'f64':{const n=jsonBinary64Value(v);if(!Number.isFinite(n))throw Error('non-finite f64 cannot encode as JSON');return jsonVariant(2,Object.is(n,-0)?'-0':String(n));}
     case 'f32':{let n;if(typeof v==='number')n=Math.fround(v);else{const b=new DataView(new ArrayBuffer(4));b.setUint32(0,v.F32Bits,true);n=b.getFloat32(0,true);}if(!Number.isFinite(n))throw Error('non-finite f32 cannot encode as JSON');return jsonVariant(2,Object.is(n,-0)?'-0':String(n));}
     case 'string':case 'id':case 'enum':return jsonVariant(3,v);
     case 'list':case 'vector':return jsonVariant(4,Array.from(v,x=>write(t.element,x,d+1)));
@@ -431,7 +440,8 @@ function streamJsonBinary(values,text,options,typed,compact=false){
    if(['string','id','enum'].includes(t.kind)){if(ch!=='"')bad();w.text(v);return;}
    if(ch!=='-'&&!(ch>='0'&&ch<='9'))bad();
    if(t.kind==='int'){w.text(jsonInteger(v,4096));return;}
-   if(t.kind==='f32'){jsonFloatScratch.setFloat32(0,Number(v),true);if(!Number.isFinite(jsonFloatScratch.getFloat32(0,true)))throw Error('JSON f32 overflow');w.word(jsonFloatScratch.getUint32(0,true));}
+   if(t.kind==='f64'){const n=Number(v);if(!Number.isFinite(n))throw Error('JSON f64 overflow');const b=new DataView(new ArrayBuffer(8));b.setFloat64(0,n,true);w.wide(b.getBigUint64(0,true));}
+   else if(t.kind==='f32'){jsonFloatScratch.setFloat32(0,Number(v),true);if(!Number.isFinite(jsonFloatScratch.getFloat32(0,true)))throw Error('JSON f32 overflow');w.word(jsonFloatScratch.getUint32(0,true));}
    else{const n=BigInt(jsonInteger(v,t.kind==='u64'?20:10));if(t.kind==='u64'){if(n<0n||n>18446744073709551615n)bad();w.wide(n);}else if(t.kind==='u32'){if(n<0n||n>4294967295n)bad();w.word(Number(n));}else if(t.kind==='i32'){if(n< -2147483648n||n>2147483647n)bad();w.word(Number(n)>>>0);}else bad();}
   });
  };
@@ -463,6 +473,7 @@ function streamWireJsonText(values,bytes,options,library){
    case 'u32':emit(String(dv.getUint32(p,true)));break;
    case 'u64':emit(String(dv.getBigUint64(p,true)));break;
    case 'i32':emit(String(dv.getInt32(p,true)));break;
+   case 'f64':{const n=dv.getFloat64(p,true);if(!Number.isFinite(n))throw Error('non-finite f64 cannot encode as JSON');emit(Object.is(n,-0)?'-0':String(n));break;}
    case 'f32':{const n=dv.getFloat32(p,true);if(!Number.isFinite(n))throw Error('non-finite f32 cannot encode as JSON');emit(Object.is(n,-0)?'-0':String(n));break;}
    case 'int':emit(decoder.decode(bytes.subarray(p,f.end)));break;
    case 'string':case 'id':case 'enum':string(decoder.decode(bytes.subarray(p,f.end)));break;

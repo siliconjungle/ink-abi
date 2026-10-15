@@ -6,7 +6,7 @@ export function width(t,depth=0) {
   if(t.kind==='list') {if(depth!==0)fail('nested packed list');return width(t.element,depth+1);}
   if(t.kind==='vector') {if(!Number.isSafeInteger(t.size)||t.size<1)fail('invalid vector size');const n=t.size*width(t.element,depth+1);if(!Number.isSafeInteger(n))fail('packed width overflow');return n;}
   if(t.kind==='record') {if(!Array.isArray(t.fields)||!t.fields.length||new Set(t.fields.map(f=>f.name)).size!==t.fields.length||t.fields.some(f=>typeof f.name!=='string'))fail('invalid packed record');const n=t.fields.reduce((n,f)=>n+width(f.type,depth+1),0);if(!Number.isSafeInteger(n))fail('packed width overflow');return n;}
-  if(t.kind==='u64')return 2;
+  if(t.kind==='u64'||t.kind==='f64')return 2;
   if(['u32','i32','f32','bool'].includes(t.kind))return 1;
   fail('unsupported packed type');
 }
@@ -21,7 +21,7 @@ export function pack(v, t) {
     return {words:v instanceof Uint32Array ? v.slice() : Uint32Array.from(v),type:t,count:v.length,finite:true};
   }
   const words = [],
-    view = new DataView(new ArrayBuffer(4));
+    view = new DataView(new ArrayBuffer(8));
   let finite = true;
   function go(v, t) {
     switch (t.kind) {
@@ -54,6 +54,17 @@ export function pack(v, t) {
         words.push(Number(n & 4294967295n), Number(n >> 32n));
         break;
       }
+      case "f64": {
+        let bits;
+        if(typeof v==='number'&&Number.isFinite(v)){view.setFloat64(0,v,true);bits=view.getBigUint64(0,true);}
+        else{
+          if(!v||typeof v!=='object'||Object.keys(v).length!==1||!Object.hasOwn(v,'F64Bits'))fail('invalid F64Bits');const text=v.F64Bits;
+          if(typeof text!=='string'||text.length>20||!/^(0|[1-9][0-9]*)$/.test(text))fail('invalid F64Bits');
+          bits=BigInt(text);if(bits>18446744073709551615n)fail('invalid F64Bits');
+          view.setBigUint64(0,bits,true);finite &&= Number.isFinite(view.getFloat64(0,true));
+        }
+        words.push(Number(bits&4294967295n),Number(bits>>32n));break;
+      }
       case "f32":
         if (typeof v === "number") {
           view.setFloat32(0, v, true);
@@ -82,7 +93,7 @@ export function pack(v, t) {
 export function unpack(words, t, native = false, destination = null) {
   const stride=width(t);if(words.length%stride||t.kind!=="list"&&words.length!==stride)fail("invalid result layout");
   let i = 0;
-  const view = new DataView(new ArrayBuffer(4));
+  const view = new DataView(new ArrayBuffer(8));
   function go(t) {
     switch (t.kind) {
       case "list": {
@@ -104,6 +115,11 @@ export function unpack(words, t, native = false, destination = null) {
       case "u64": {
         const n = BigInt(words[i++]) + (BigInt(words[i++]) << 32n);
         return native ? n : n <= BigInt(Number.MAX_SAFE_INTEGER) ? Number(n) : n.toString();
+      }
+      case "f64": {
+        const bits=BigInt(words[i++])|(BigInt(words[i++])<<32n);
+        view.setBigUint64(0,bits,true);const value=view.getFloat64(0,true);
+        return Number.isFinite(value)?value:{F64Bits:bits.toString()};
       }
       case "f32":
         view.setUint32(0, words[i++], true);
