@@ -30,7 +30,9 @@ pub fn validate_profile(v: &Value, target: &str) -> Result<(), String> {
     {
         return Err("cost profile target/byte budget".into());
     }
-    if (v["schema"] != 1 && v["schema"] != 2 && v["schema"] != 3) || v["target_key"].as_str() != Some(target) {
+    if (v["schema"] != 1 && v["schema"] != 2 && v["schema"] != 3)
+        || v["target_key"].as_str() != Some(target)
+    {
         return Err("invalid cost profile target/schema".into());
     }
     let models = object(&v["models"])?;
@@ -76,15 +78,25 @@ pub fn validate_profile(v: &Value, target: &str) -> Result<(), String> {
                 price(w)?;
             }
             if let Some(products) = p.get("products") {
-                if v["schema"] != 2 && v["schema"] != 3 { return Err("product costs require profile schema 2 or 3".into()); }
+                if v["schema"] != 2 && v["schema"] != 3 {
+                    return Err("product costs require profile schema 2 or 3".into());
+                }
                 let products = products.as_array().ok_or("invalid profile products")?;
-                if products.len() > 32 { return Err("profile product budget".into()); }
+                if products.len() > 32 {
+                    return Err("profile product budget".into());
+                }
                 for product in products {
-                    let factors = product["features"].as_array().ok_or("invalid product features")?;
-                    if !(2..=3).contains(&factors.len()) { return Err("profile product degree".into()); }
+                    let factors = product["features"]
+                        .as_array()
+                        .ok_or("invalid product features")?;
+                    if !(2..=3).contains(&factors.len()) {
+                        return Err("profile product degree".into());
+                    }
                     for factor in factors {
                         let name = factor.as_str().ok_or("invalid product feature")?;
-                        if !FEATURES.contains(&name) || !domains.contains_key(name) { return Err("unbounded product feature".into()); }
+                        if !FEATURES.contains(&name) || !domains.contains_key(name) {
+                            return Err("unbounded product feature".into());
+                        }
                     }
                     price(&product["coefficient_ns"])?;
                 }
@@ -136,7 +148,9 @@ pub fn decide(options: &Value, context: &Value, eligible: &[String]) -> Result<V
         if comparable {
             for candidate in eligible {
                 if let Some(p) = model["backends"].get(candidate) {
-                    if profile["schema"] == 3 && !crate::joint_domain::contains(&p["support"], features)? {
+                    if profile["schema"] == 3
+                        && !crate::joint_domain::contains(&p["support"], features)?
+                    {
                         continue;
                     }
                     let mut estimate = object(&p["terms"])?
@@ -146,9 +160,13 @@ pub fn decide(options: &Value, context: &Value, eligible: &[String]) -> Result<V
                         });
                     if let Some(products) = p.get("products").and_then(Value::as_array) {
                         for product in products {
-                            let value = product["features"].as_array().unwrap().iter().fold(
-                                product["coefficient_ns"].as_f64().unwrap(),
-                                |v, n| v * features[n.as_str().unwrap()].as_f64().unwrap());
+                            let value = product["features"]
+                                .as_array()
+                                .unwrap()
+                                .iter()
+                                .fold(product["coefficient_ns"].as_f64().unwrap(), |v, n| {
+                                    v * features[n.as_str().unwrap()].as_f64().unwrap()
+                                });
                             estimate += value;
                         }
                     }
@@ -230,6 +248,17 @@ pub fn features(v: &Value) -> Result<Value, String> {
 }
 
 pub fn request(v: &Value) -> Result<Value, String> {
+    if v["operation"] == "objective-prepare" || v["operation"] == "objective-decide" {
+        let request = serde_json::from_value(v["request"].clone()).map_err(|e| e.to_string())?;
+        return if v["operation"] == "objective-prepare" {
+            serde_json::to_value(crate::objective::prepare(&request)?)
+        } else {
+            let assessment =
+                serde_json::from_value(v["assessment"].clone()).map_err(|e| e.to_string())?;
+            serde_json::to_value(crate::objective::decide(&request, &assessment)?)
+        }
+        .map_err(|e| e.to_string());
+    }
     if v["operation"] == "usage-summary" {
         let events: Vec<crate::usage::Event> =
             serde_json::from_value(v["events"].clone()).map_err(|e| e.to_string())?;

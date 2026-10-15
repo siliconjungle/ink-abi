@@ -171,53 +171,82 @@ pub fn validate(r: &Request) -> Result<(), String> {
     }
     Ok(())
 }
+pub(crate) fn horizon_cost(r: &Request, id: &str, upper: bool) -> Option<f64> {
+    let variant = r.profile.variants.get(id)?;
+    r.window
+        .counts
+        .iter()
+        .try_fold(0.0, |total, (cell, n)| {
+            variant
+                .cells
+                .get(cell)
+                .map(|price| total + *n as f64 * if upper { price.high_ns } else { price.low_ns })
+        })
+        .map(|n| n / r.window.calls as f64 * r.policy.horizon_calls as f64)
+}
+
+/// Shared hard resource/evidence gate. A different objective cannot waive it.
+pub(crate) fn eligible_migration<'a>(r: &'a Request, id: &str) -> Option<&'a Migration> {
+    let variant = r.profile.variants.get(id)?;
+    let policy = &r.policy;
+    if id == r.current
+        || r.window.saturated
+        || r.state.switches >= policy.max_switches
+        || variant.peak_bytes > policy.memory_limit_bytes
+    {
+        return None;
+    }
+    let migration = r
+        .profile
+        .migrations
+        .iter()
+        .find(|m| m.from == r.current && m.to == id)?;
+    (migration.peak_bytes <= policy.memory_limit_bytes
+        && migration.max_pause_ns <= policy.max_pause_ns
+        && r.window.state_elements >= migration.min_state_elements
+        && r.window.state_elements <= migration.max_state_elements)
+        .then_some(migration)
+}
+
+/// A proposal is acknowledged by the host only after successful migration.
+pub(crate) fn confirm(r: &Request, candidate: Option<&str>, mut state: State) -> (State, bool) {
+    let mut ready = false;
+    if let Some(id) = candidate {
+        state.confirmations = if state.pending == id {
+            (state.confirmations + 1).min(64)
+        } else {
+            1
+        };
+        state.pending = id.into();
+        ready = state.confirmations >= r.policy.stable_windows
+            && r.window.total_calls - state.last_switch_call >= r.policy.min_residence_calls;
+    } else {
+        state.pending.clear();
+        state.confirmations = 0;
+    }
+    (state, ready)
+}
+
 pub fn decide(r: &Request) -> Result<Decision, String> {
     validate(r)?;
     let p = &r.policy;
     let w = &r.window;
-    let mut s = r.state.clone();
     let mut result = Decision {
         selected: r.current.clone(),
         reason: "no comparable profitable alternative".into(),
-        state: s.clone(),
+        state: r.state.clone(),
         predicted_saving_ns: 0.0,
     };
-    let cost = |id: &str, upper: bool| -> Option<f64> {
-        let v = &r.profile.variants[id];
-        w.counts
-            .iter()
-            .try_fold(0.0, |total, (cell, n)| {
-                v.cells
-                    .get(cell)
-                    .map(|c| total + *n as f64 * if upper { c.high_ns } else { c.low_ns })
-            })
-            .map(|n| n / w.calls as f64 * p.horizon_calls as f64)
-    };
-    let baseline = cost(&r.current, false);
+    let baseline = horizon_cost(r, &r.current, false);
     let mut best = None;
     let mut best_saving = 0.0;
-    if !w.saturated && s.switches < p.max_switches {
+    if !w.saturated && r.state.switches < p.max_switches {
         if let Some(base) = baseline {
-            for (id, v) in &r.profile.variants {
-                if id == &r.current || v.peak_bytes > p.memory_limit_bytes {
-                    continue;
-                }
-                let Some(m) = r
-                    .profile
-                    .migrations
-                    .iter()
-                    .find(|m| m.from == r.current && m.to == *id)
-                else {
+            for id in r.profile.variants.keys() {
+                let Some(m) = eligible_migration(r, id) else {
                     continue;
                 };
-                if m.peak_bytes > p.memory_limit_bytes
-                    || m.max_pause_ns > p.max_pause_ns
-                    || w.state_elements < m.min_state_elements
-                    || w.state_elements > m.max_state_elements
-                {
-                    continue;
-                }
-                let Some(c) = cost(id, true) else {
+                let Some(c) = horizon_cost(r, id, true) else {
                     continue;
                 };
                 let saving = base - c - m.high_ns * p.migration_margin;
@@ -228,26 +257,16 @@ pub fn decide(r: &Request) -> Result<Decision, String> {
             }
         }
     }
+    let (state, ready) = confirm(r, best.as_deref(), r.state.clone());
     if let Some(id) = best {
-        s.confirmations = if s.pending == id {
-            (s.confirmations + 1).min(64)
-        } else {
-            1
-        };
-        s.pending = id.clone();
         result.reason = "waiting for sustained savings or residence interval".into();
-        if s.confirmations >= p.stable_windows
-            && w.total_calls - s.last_switch_call >= p.min_residence_calls
-        {
+        if ready {
             result.selected = id;
             result.reason = "measured savings cover migration and uncertainty margin".into();
             result.predicted_saving_ns = best_saving;
             // Host acknowledges only after a successful migration; proposal is not a commit.
         }
-    } else {
-        s.pending.clear();
-        s.confirmations = 0;
     }
-    result.state = s;
+    result.state = state;
     Ok(result)
 }

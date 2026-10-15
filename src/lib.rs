@@ -157,9 +157,7 @@ fn validate_flat(t: &Value, depth: usize) -> Result<(), String> {
             }
             Ok(())
         }
-        _ => {
-            Err("packed compute values must be flat numeric components".into())
-        }
+        _ => Err("packed compute values must be flat numeric components".into()),
     }
 }
 pub fn flat_width(t: &Value) -> Result<usize, String> {
@@ -193,17 +191,18 @@ mod tests {
 
 pub mod packed;
 
-pub mod selection;
 mod joint_domain;
+pub mod objective;
+pub mod selection;
 pub const SELECTION_WASM: &[u8] = include_bytes!("../selection.wasm");
 pub const SELECTION_JS_SOURCE: &str = include_str!("selection.mjs");
 
 mod wire_tags;
 pub use wire_tags::InkValueKind as ValueKind;
-pub const VALUE_KIND_RUST_SOURCE:&str=include_str!("wire_tags.rs");
+pub const VALUE_KIND_RUST_SOURCE: &str = include_str!("wire_tags.rs");
 
-pub mod value_wire;
 pub mod json_value;
+pub mod value_wire;
 pub const VALUE_WIRE_JS_SOURCE: &str = include_str!("value-wire.mjs");
 pub const JSON_VALUE_JS_SOURCE: &str = include_str!("json-value.mjs");
 pub const VALUE_WIRE_RUST_SOURCE: &str = include_str!("value_wire.rs");
@@ -217,5 +216,5 @@ pub mod wire_packed;
 
 pub mod adaptive;
 
-pub mod usage;
 pub mod json_lookup;
+pub mod usage;
