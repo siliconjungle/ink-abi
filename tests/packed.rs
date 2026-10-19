@@ -61,7 +61,7 @@ fn packed_words_match_javascript_for_every_flat_carrier_and_rejections() {
         serde_json::to_vec(&json!({"cases":cases,"errors":errors})).unwrap(),
     )
     .unwrap();
-    std::fs::write(dir.join("test.mjs"),"import assert from 'node:assert/strict';import{readFile}from'node:fs/promises';import{pack,unpack,width}from'./packed.mjs';const f=JSON.parse(await readFile(new URL('./cases.json',import.meta.url)));for(const c of f.cases){const d=pack(c.value,c.type);assert.deepEqual(Array.from(d.words),c.words);assert.equal(d.count,c.count);assert.equal(d.finite,c.finite);assert.equal(width(c.type),c.width);assert.deepEqual(Array.from(pack(unpack(d.words,c.type),c.type).words),c.words);}for(const c of f.errors)assert.throws(()=>pack(c.value,c.type));").unwrap();
+    std::fs::write(dir.join("test.mjs"),"import assert from 'node:assert/strict';import{readFile}from'node:fs/promises';import{pack,unpack,width,capture}from'./packed.mjs';const f=JSON.parse(await readFile(new URL('./cases.json',import.meta.url)));for(const c of f.cases){const d=pack(c.value,c.type);assert.deepEqual(Array.from(d.words),c.words);const owned=capture(c.value,c.type);assert.deepEqual(Array.from(pack(owned.javascript,c.type).words),c.words);assert.equal(owned.byteLength,c.words.length*4);assert.equal(owned.count,c.count);assert.equal(owned.finite,c.finite);assert.equal(d.count,c.count);assert.equal(d.finite,c.finite);assert.equal(width(c.type),c.width);assert.deepEqual(Array.from(pack(unpack(d.words,c.type),c.type).words),c.words);}for(const c of f.errors){assert.throws(()=>pack(c.value,c.type));assert.throws(()=>capture(c.value,c.type));}").unwrap();
     let run = std::process::Command::new("node")
         .arg(dir.join("test.mjs"))
         .output()
@@ -74,5 +74,8 @@ fn packed_words_match_javascript_for_every_flat_carrier_and_rejections() {
     std::fs::write(dir.join("native.mjs"), include_str!("fixtures/native-destination.mjs")).unwrap();
     let native = std::process::Command::new("node").arg(dir.join("native.mjs")).output().unwrap();
     assert!(native.status.success(), "{}", String::from_utf8_lossy(&native.stderr));
+    std::fs::write(dir.join("capture.mjs"), include_str!("fixtures/owned-capture.mjs")).unwrap();
+    let owned = std::process::Command::new("node").arg(dir.join("capture.mjs")).output().unwrap();
+    assert!(owned.status.success(), "{}", String::from_utf8_lossy(&owned.stderr));
     std::fs::remove_dir_all(dir).unwrap();
 }

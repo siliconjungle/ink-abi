@@ -1,0 +1,46 @@
+{
+  "schema": 1,
+  "keep": [
+    {
+      "path": "src",
+      "reason": "ABI source, pinned build or required conformance input"
+    },
+    {
+      "path": "tests",
+      "reason": "ABI source, pinned build or required conformance input"
+    },
+    {
+      "path": "Cargo.toml",
+      "reason": "ABI source, pinned build or required conformance input"
+    },
+    {
+      "path": "Cargo.lock",
+      "reason": "ABI source, pinned build or required conformance input"
+    },
+    {
+      "path": "README.md",
+      "reason": "ABI source, pinned build or required conformance input"
+    },
+    {
+      "path": "LICENSE",
+      "reason": "ABI source, pinned build or required conformance input"
+    },
+    {
+      "path": "examples",
+      "reason": "ABI source, pinned build or required conformance input"
+    },
+    {
+      "path": ".gitignore",
+      "reason": "ABI source, pinned build or required conformance input"
+    },
+    {
+      "path": "storage-retention.json",
+      "reason": "ABI source, pinned build or required conformance input"
+    },
+    {
+      "path": "target",
+      "reason": "Active required ABI capture conformance build"
+    }
+  ],
+  "safe_to_remove": []
+}

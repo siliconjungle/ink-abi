@@ -23,6 +23,12 @@ Every backend pins this repository. Generated hosts consume its exported sources
 * `selection::decide` is the only adaptive/static decision implementation. Browser
   hosts execute the same Rust through the included Wasm module. The common
   `features` function computes workload counts from transport/stage descriptors.
+* The shared packed JavaScript source also exports `capture(value, descriptor)`.
+  It eagerly owns the packed input domain as native JavaScript values, with
+  exact rounding, raw nonfinite tags, element count, byte size and finite flags.
+  Ordinary floats need no word packing. CPU/GPU transport can be materialized
+  later with `pack(capture.javascript, descriptor)`; owned U32 lists already
+  supply that transport. This does not select a backend or cache a computation.
 
 Saved prices are untrusted profitability evidence. They bind an exact target key,
 compiled scope, execution boundary and observed feature domain. Missing evidence,
