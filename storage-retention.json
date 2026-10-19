@@ -36,11 +36,12 @@
     {
       "path": "storage-retention.json",
       "reason": "ABI source, pinned build or required conformance input"
-    },
-    {
-      "path": "target",
-      "reason": "Active required ABI capture conformance build"
     }
   ],
-  "safe_to_remove": []
+  "safe_to_remove": [
+    {
+      "path": "target",
+      "reason": "Completed required owned capture ABI validation; source tests and selected proof retained in Ink distribution"
+    }
+  ]
 }
