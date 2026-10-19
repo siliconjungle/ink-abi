@@ -20,7 +20,13 @@ export function capture(v,t) {
   if(!copier){copier=compileCapture(t);if(immutableType(t))captures.set(t,copier);}
   return copier(v);
 }
-function immutableType(t){return Object.isFrozen(t)&&(t.kind==='record'?Object.isFrozen(t.fields)&&t.fields.every(f=>Object.isFrozen(f)&&immutableType(f.type)):t.kind==='list'||t.kind==='vector'?immutableType(t.element):true);}
+function fixedData(value,keys){return Object.isFrozen(value)&&keys.every(key=>Object.hasOwn(Object.getOwnPropertyDescriptor(value,key)??{},'value'));}
+function immutableType(t){
+  if(!fixedData(t,['kind']))return false;
+  if(t.kind==='record')return fixedData(t,['fields'])&&fixedData(t.fields,Array.from({length:t.fields.length},(_,i)=>String(i)))&&t.fields.every(f=>fixedData(f,['name','type'])&&immutableType(f.type));
+  if(t.kind==='list'||t.kind==='vector')return fixedData(t,t.kind==='vector'?['element','size']:['element'])&&immutableType(t.element);
+  return true;
+}
 function compileCapture(type) {
   const stride=width(type);
   function compile(t) {

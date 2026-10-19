@@ -30,6 +30,10 @@ const snapshot=capture(input,record);assert.deepEqual(order,['b','a']);assert.eq
 const proto={kind:'record',fields:[{name:'__proto__',type:scalar('u32')}]};
 assert.deepEqual(capture(JSON.parse('{"__proto__":7}'),proto).javascript,JSON.parse('{"__proto__":7}'));
 const mutable=Object.freeze({kind:'list',element:{kind:'u32'}});capture([1],mutable);mutable.element.kind='bool';assert.deepEqual(capture([true],mutable).javascript,[true]);
+let changingKind='u32';const accessor=Object.freeze({get kind(){return changingKind;}});
+assert.equal(capture(1,accessor).javascript,1);changingKind='bool';assert.equal(capture(true,accessor).javascript,true);
+let changingElement={kind:'u32'};const nestedAccessor=Object.freeze({kind:'list',get element(){return changingElement;}});
+assert.deepEqual(capture([1],nestedAccessor).javascript,new Uint32Array([1]));changingElement={kind:'bool'};assert.deepEqual(capture([true],nestedAccessor).javascript,[true]);
 for(const t of [scalar('u32'),scalar('i32')])assert(Object.is(capture(-0,t).javascript,0));
 assert.throws(()=>capture({length:67108865},list(scalar('f32'))),/budget/);
 assert.throws(()=>capture(new DataView(new ArrayBuffer(8)),list(scalar('f32'))));
