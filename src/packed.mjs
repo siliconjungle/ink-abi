@@ -1,6 +1,20 @@
 // Shared packed value transport. Executed by every browser host.
 const MAX_BYTES=256*1024*1024;
 const fail=s=>{throw Error(s)};
+const numericArrays={u32:Uint32Array,i32:Int32Array,f32:Float32Array,u64:BigUint64Array,f64:Float64Array};
+const typedPrototype=Object.getPrototypeOf(Uint32Array.prototype);
+const typedGet=Object.fromEntries(['length','byteLength','byteOffset','buffer'].map(name=>[name,Object.getOwnPropertyDescriptor(typedPrototype,name).get]));
+const littleEndian=new Uint8Array(Uint32Array.of(1).buffer)[0]===1;
+// Exact flat numeric destination storage. Callers own this memory; no private
+// state/readback view escapes. Exceptional F32/F64 payloads copy as raw words.
+export function numericDestination(type,destination,count=0){
+  const kind=type?.kind==='list'?type.element?.kind:null,constructor=numericArrays[kind];
+  if(!constructor||!(destination instanceof constructor))fail('numeric destination dtype mismatch');
+  const get=name=>Reflect.apply(typedGet[name],destination,[]);
+  if(!Number.isSafeInteger(count)||count<0||get('length')<count)fail('destination capacity');
+  if(!littleEndian)fail('numeric destination requires little-endian storage');
+  return new Uint32Array(get('buffer'),get('byteOffset'),get('byteLength')/4);
+}
 export function width(t,depth=0) {
   if(depth>32||!t||typeof t!=='object')fail('invalid packed type');
   if(t.kind==='list') {if(depth!==0)fail('nested packed list');return width(t.element,depth+1);}
@@ -166,6 +180,14 @@ export function pack(v, t) {
 }
 export function unpack(words, t, native = false, destination = null) {
   const stride=width(t);if(words.length%stride||t.kind!=="list"&&words.length!==stride)fail("invalid result layout");
+  if(destination&&t.kind==='list'&&
+    ((t.element.kind==='f32'&&destination instanceof Float32Array)||
+     (t.element.kind==='f64'&&destination instanceof Float64Array)||
+     (t.element.kind==='u32'&&destination instanceof Uint32Array)||
+     (t.element.kind==='i32'&&destination instanceof Int32Array)||
+     (t.element.kind==='u64'&&destination instanceof BigUint64Array))){
+    numericDestination(t,destination,words.length/stride).set(words);return destination;
+  }
   let i = 0;
   const view = new DataView(new ArrayBuffer(8));
   function go(t) {

@@ -29,6 +29,13 @@ Every backend pins this repository. Generated hosts consume its exported sources
   Ordinary floats need no word packing. CPU/GPU transport can be materialized
   later with `pack(capture.javascript, descriptor)`; owned U32 lists already
   supply that transport. This does not select a backend or cache a computation.
+* `numericDestination(descriptor, typedArray, count)` validates caller-owned
+  flat numeric List destinations and exposes their word view to host adapters.
+  `unpack` copies directly into matching F32/F64/U32/I32/U64 typed destinations,
+  retaining signed zero, infinities and exact NaN payloads. Ordinary Array
+  destinations retain their public numeric/tag carriers. Intrinsic typed-array
+  bounds ignore shadowed host properties; capacity errors precede writes and
+  destination tails stay untouched. This changes transport, not arithmetic.
 
 Saved prices are untrusted profitability evidence. They bind an exact target key,
 compiled scope, execution boundary and observed feature domain. Missing evidence,
