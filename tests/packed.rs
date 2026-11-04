@@ -77,5 +77,8 @@ fn packed_words_match_javascript_for_every_flat_carrier_and_rejections() {
     std::fs::write(dir.join("capture.mjs"), include_str!("fixtures/owned-capture.mjs")).unwrap();
     let owned = std::process::Command::new("node").arg(dir.join("capture.mjs")).output().unwrap();
     assert!(owned.status.success(), "{}", String::from_utf8_lossy(&owned.stderr));
+    std::fs::write(dir.join("typed.mjs"), include_str!("fixtures/typed-ingress.mjs")).unwrap();
+    let typed = std::process::Command::new("node").arg(dir.join("typed.mjs")).output().unwrap();
+    assert!(typed.status.success(), "{}", String::from_utf8_lossy(&typed.stderr));
     std::fs::remove_dir_all(dir).unwrap();
 }

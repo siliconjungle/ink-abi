@@ -29,6 +29,18 @@ Every backend pins this repository. Generated hosts consume its exported sources
   Ordinary floats need no word packing. CPU/GPU transport can be materialized
   later with `pack(capture.javascript, descriptor)`; owned U32 lists already
   supply that transport. This does not select a backend or cache a computation.
+  With deeply frozen flat F32 metadata, ordinary same-realm Float32Array inputs
+  of at least 64 elements can snapshot their finite words directly. Packing still
+  rejects numeric NaN/infinity and retains signed zero/subnormals.
+  `captureTransport` preserves capture semantics while preferring words: eligible inputs of at least 128
+  elements provide owned transport words and lazily materialize the ordinary
+  JavaScript Array only when requested; small captures retain eager Arrays.
+  Source mutation after capture cannot change either representation. Modified
+  iterators, subclasses, shadowed lengths, mutable metadata and tagged inputs
+  retain the ordinary checked traversal. Every changed input is checked afresh.
+  Ordinary `capture` keeps its existing eager native representation. Runtime uses
+  transport preference only for a known CPU/GPU preparation; JavaScript or unknown
+  backend choices retain native capture.
 * `numericDestination(descriptor, typedArray, count)` validates caller-owned
   flat numeric List destinations and exposes their word view to host adapters.
   `unpack` copies directly into matching F32/F64/U32/I32/U64 typed destinations,

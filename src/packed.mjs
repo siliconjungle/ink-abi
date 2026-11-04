@@ -5,6 +5,54 @@ const numericArrays={u32:Uint32Array,i32:Int32Array,f32:Float32Array,u64:BigUint
 const typedPrototype=Object.getPrototypeOf(Uint32Array.prototype);
 const typedGet=Object.fromEntries(['length','byteLength','byteOffset','buffer'].map(name=>[name,Object.getOwnPropertyDescriptor(typedPrototype,name).get]));
 const littleEndian=new Uint8Array(Uint32Array.of(1).buffer)[0]===1;
+const FloatArray=Float32Array,WordArray=Uint32Array;
+const typedName=Object.getOwnPropertyDescriptor(typedPrototype,Symbol.toStringTag).get;
+const typedSet=typedPrototype.set,typedIterator=typedPrototype[Symbol.iterator];
+const iteratorPrototype=Object.getPrototypeOf(Reflect.apply(typedIterator,new FloatArray(0),[]));
+const iteratorNext=Object.getOwnPropertyDescriptor(iteratorPrototype,'next').value;
+const floatLists=new WeakSet();
+function fixedFloatList(type){
+  if(floatLists.has(type))return true;
+  if(!fixedData(type,['kind','element'])||type.kind!=='list'||
+     !fixedData(type.element,['kind'])||type.element.kind!=='f32')return false;
+  floatLists.add(type);return true;
+}
+// Optional literal transport for an ordinary same-realm Float32Array. Exotic
+// iterators, subclasses and shadowed lengths retain their existing traversal.
+// Copy first, then validate the owned snapshot; no numeric NaN/Infinity is admitted.
+function finiteFloatSnapshot(value){
+  const prototype=FloatArray.prototype;
+  if(!littleEndian||!ArrayBuffer.isView(value)||Object.getPrototypeOf(value)!==prototype||
+     Reflect.apply(typedName,value,[])!=='Float32Array'||
+     Object.hasOwn(value,'length')||Object.hasOwn(value,Symbol.iterator)||
+     Object.getPrototypeOf(prototype)!==typedPrototype||
+     Object.hasOwn(prototype,'length')||Object.hasOwn(prototype,Symbol.iterator)||
+     Object.getOwnPropertyDescriptor(typedPrototype,'length')?.get!==typedGet.length||
+     Object.getOwnPropertyDescriptor(typedPrototype,Symbol.iterator)?.value!==typedIterator||
+     Object.getOwnPropertyDescriptor(iteratorPrototype,'next')?.value!==iteratorNext)return null;
+  const count=Reflect.apply(typedGet.length,value,[]);
+  if(count*4>MAX_BYTES)fail('input exceeds 256 MiB budget');
+  const floats=new FloatArray(count);
+  // Intrinsic typed set also rejects detached/out-of-bounds source views.
+  Reflect.apply(typedSet,floats,[value]);
+  const words=new WordArray(Reflect.apply(typedGet.buffer,floats,[]));
+  for(let i=0;i<count;i++)if((words[i]&0x7f800000)===0x7f800000)fail('f32 input overflow');
+  return {words,floats,count};
+}
+// Explicit transport preference keeps the ordinary native capture hot path
+// unchanged. Only a known CPU/GPU consumer needs eager words and lazy Arrays.
+export function captureTransport(value,type){
+  if(!type||typeof type!=='object'||!fixedFloatList(type)||!ArrayBuffer.isView(value)||
+     Reflect.apply(typedName,value,[])!=='Float32Array'||
+     Reflect.apply(typedGet.length,value,[])<128)return capture(value,type);
+  const data=finiteFloatSnapshot(value);if(!data)return capture(value,type);
+  let native;
+  return {type,count:data.count,finite:true,byteLength:data.count*4,words:data.words,
+    get javascript(){
+      if(!native){native=new Array(data.count);for(let i=0;i<data.count;i++)native[i]=data.floats[i];}
+      return native;
+    }};
+}
 // Exact flat numeric destination storage. Callers own this memory; no private
 // state/readback view escapes. Exceptional F32/F64 payloads copy as raw words.
 export function numericDestination(type,destination,count=0){
@@ -102,12 +150,15 @@ function compileCapture(type) {
 export function pack(v, t) {
   const stride=width(t);
   if(t.kind==='list'&&(!Array.isArray(v)&&!ArrayBuffer.isView(v)&&!(v instanceof Uint32Array)))fail('expected list');
-  if((t.kind==='list'?v.length:1)*stride*4>MAX_BYTES)fail('input exceeds 256 MiB budget');
+  const count=t.kind==='list'?v.length:1;
+  if(count*stride*4>MAX_BYTES)fail('input exceeds 256 MiB budget');
   if(t.kind === 'list' && t.element.kind === 'u32') {
     if(v.length * 4 > MAX_BYTES) fail('input exceeds 256 MiB budget');
     if(!(v instanceof Uint32Array)&&v.some(x=>!Number.isInteger(x)||x<0||x>4294967295))fail('u32 outside range');
     return {words:v instanceof Uint32Array ? v.slice() : Uint32Array.from(v),type:t,count:v.length,finite:true};
   }
+  const data=count>=64&&fixedFloatList(t)?finiteFloatSnapshot(v):null;
+  if(data)return {words:data.words,type:t,count:data.count,finite:true};
   const words = [],
     view = new DataView(new ArrayBuffer(8));
   let finite = true;
