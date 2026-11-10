@@ -7,20 +7,27 @@ pub const VALUE_ABI: &str = "ink-values-v1";
 pub const MAX_TYPE_DEPTH: usize = 32;
 pub mod float64;
 
-pub fn describe<T: Serialize, R: Serialize, E: Serialize, I: Serialize>(
-    ty: &T,
-    records: &R,
-    enums: &E,
-    ids: &I,
-) -> Result<Value, String> {
-    describe_json(
-        &serde_json::to_value(ty).map_err(|e| e.to_string())?,
-        &serde_json::to_value(records).map_err(|e| e.to_string())?,
-        &serde_json::to_value(enums).map_err(|e| e.to_string())?,
-        &serde_json::to_value(ids).map_err(|e| e.to_string())?,
-        &mut BTreeSet::new(),
-        0,
-    )
+/// Describe one type against a program's declarations. Every call serializes
+/// typed declarations afresh, so a caller describing many types of one
+/// program should serialize `records`, `enums` and `ids` to `Value` once and
+/// pass those: arguments that already are JSON values are borrowed as they are.
+pub fn describe<T, R, E, I>(ty: &T, records: &R, enums: &E, ids: &I) -> Result<Value, String>
+where
+    T: Serialize + 'static,
+    R: Serialize + 'static,
+    E: Serialize + 'static,
+    I: Serialize + 'static,
+{
+    fn json<S: Serialize + 'static>(value: &S) -> Result<std::borrow::Cow<'_, Value>, String> {
+        match (value as &dyn std::any::Any).downcast_ref::<Value>() {
+            Some(value) => Ok(std::borrow::Cow::Borrowed(value)),
+            None => serde_json::to_value(value)
+                .map(std::borrow::Cow::Owned)
+                .map_err(|e| e.to_string()),
+        }
+    }
+    let (ty, records, enums, ids) = (json(ty)?, json(records)?, json(enums)?, json(ids)?);
+    describe_json(&ty, &records, &enums, &ids, &mut BTreeSet::new(), 0)
 }
 
 fn describe_json(
@@ -178,6 +185,22 @@ mod tests {
         let d = describe(&json!({"Named":"Node"}), &recursive, &json!({}), &json!([])).unwrap();
         assert_eq!(d["fields"][0]["type"]["element"]["kind"], "ref");
         assert!(packed_width(&d).is_err());
+    }
+    #[test]
+    fn typed_and_json_declarations_describe_alike() {
+        // Typed declarations are serialized per call; JSON ones are borrowed.
+        let records = std::collections::BTreeMap::from([
+            ("R".to_string(), vec![("x", json!("U64")), ("next", json!({"Option":{"Named":"R"}})), ("k", json!({"Named":"K"}))]),
+        ]);
+        let enums = std::collections::BTreeMap::from([("K".to_string(), vec!["A", "B"])]);
+        let ids = vec!["Id"];
+        let json = |v: Value| v;
+        for ty in [json!({"Named":"R"}), json!({"List":{"Named":"K"}}), json!({"Named":"Id"}), json!("F32"), json!({"Named":"Absent"})] {
+            assert_eq!(
+                describe(&ty, &records, &enums, &ids),
+                describe(&ty, &json(serde_json::to_value(&records).unwrap()), &json(serde_json::to_value(&enums).unwrap()), &json(serde_json::to_value(&ids).unwrap())),
+            );
+        }
     }
     #[test]
     fn overflow_and_unsupported_carriers_reject() {
