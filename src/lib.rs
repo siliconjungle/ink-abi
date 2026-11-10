@@ -241,3 +241,70 @@ pub mod adaptive;
 
 pub mod json_lookup;
 pub mod usage;
+#[cfg(test)]
+mod scalar_wire_fuzz {
+    // The fixed-width scalar list fast path in value_wire::walk (taken when
+    // nothing is materialised) must accept and reject exactly the bytes the
+    // general element walk does, with the same error.
+    use crate::value_wire::{walk, Limits, Schema};
+    use serde_json::{json, Value};
+    #[test]
+    fn scalar_lists_validate_like_the_element_walk() {
+        let mut seed = 0x2545f4914f6cdd1du64;
+        let mut next = move || { seed ^= seed << 13; seed ^= seed >> 7; seed ^= seed << 17; seed };
+        let kinds = ["u32", "i32", "f32", "u64", "f64", "bool", "unit"];
+        let value = |kind: &str, k: u64| -> Value {
+            match kind {
+                "u32" => json!(k as u32), "i32" => json!(k as i32), "u64" => json!(k),
+                "f32" => json!({"F32Bits": k as u32}), "f64" => json!({"F64Bits": k.to_string()}),
+                "bool" => json!(k % 2 == 0), _ => Value::Null,
+            }
+        };
+        let mut checked = 0;
+        for round in 0..3000 {
+            let kind = kinds[round % kinds.len()];
+            let vector = round % 5 == 0;
+            let n = (next() % 6) as usize + usize::from(vector);
+            let element = json!({"kind": kind});
+            let list = if vector { json!({"kind":"vector","element":element,"size":n}) } else { json!({"kind":"list","element":element}) };
+            let root = json!({"kind":"record","name":"R","fields":[{"name":"xs","type":list},{"name":"tail","type":{"kind":"u32"}}]});
+            let schema = Schema::new(root, Default::default()).unwrap();
+            let xs: Vec<Value> = (0..n).map(|_| value(kind, next())).collect();
+            let mut bytes = schema.encode(&json!({"xs": xs, "tail": 7}), Limits::default()).unwrap();
+            // Corrupt one header, length, value or the tail, or truncate/extend.
+            match next() % 6 {
+                0 => {}
+                1 => { let i = 40 + (next() as usize) % (bytes.len() - 40); bytes[i] ^= 1 << (next() % 8); }
+                2 => { let i = 40 + (next() as usize) % (bytes.len() - 40); bytes[i] = (next() % 9) as u8; }
+                3 => { let k = (next() as usize) % (bytes.len() - 40); bytes.truncate(40 + k); }
+                4 => bytes.extend([0, 1, 2, 3]),
+                _ => { let i = 40 + (next() as usize) % (bytes.len() - 40); bytes[i] = 2; }
+            }
+            let limits = Limits { depth: [128, 1, 2][(next() % 3) as usize], nodes: [1_000_000, 3, 8][(next() % 3) as usize], ..Limits::default() };
+            let run = |materialize: bool| {
+                let mut pos = 40;
+                let result = walk(&schema, schema.root(), &bytes, &mut pos, &mut limits.nodes.clone(), 0, limits, materialize);
+                result.map(|_| pos)
+            };
+            if bytes.len() < 40 { continue; }
+            assert_eq!(run(false), run(true), "{kind} n={n} vector={vector} {bytes:?}");
+            checked += 1;
+        }
+        assert!(checked > 2500);
+    }
+    #[test]
+    fn bulk_scalar_frames_match_one_frame_per_value() {
+        let schema = Schema::new(json!({"kind":"list","element":{"kind":"u64"}}), Default::default()).unwrap();
+        for n in 0..40usize {
+            for (bytes, nodes, depth) in [(16 * 1024 * 1024, 1_000_000, 128), (44 + 8 + 12 * 5, 1_000_000, 128), (44 + 8 + 12 * 5 + 3, 1_000_000, 128),
+                (1 << 20, 6, 128), (1 << 20, 1_000_000, 0), (44 + 8 + 12 * 4, 5, 128), (44 + 8 + 12 * 5, 5, 128)] {
+                let limits = Limits { bytes, nodes, depth };
+                let values: Vec<u64> = (0..n as u64).map(|i| i.wrapping_mul(0x9e3779b97f4a7c15)).collect();
+                let frames = schema.encode_with(limits, |w| w.frame(|w| { w.word(n as u32)?; for v in &values { w.frame(|w| w.bytes(&v.to_le_bytes()))?; } Ok(()) }));
+                let bulk = schema.encode_with(limits, |w| w.frame(|w| { w.word(n as u32)?; w.scalars(values.iter().map(|v| v.to_le_bytes())) }));
+                assert_eq!(frames, bulk, "n={n} limits={limits:?}");
+            }
+        }
+    }
+}
+

@@ -313,6 +313,35 @@ impl Encoder {
         let length = u32::try_from(self.position() - at - 4).map_err(|_| "wire frame overflow")?;
         self.patch_word(at, length)
     }
+    /// One frame per value, each holding a fixed-width scalar: the same bytes
+    /// and the same first error as calling `frame` once per value, with one
+    /// resource check.
+    pub fn scalars<const W: usize>(
+        &mut self,
+        values: impl ExactSizeIterator<Item = [u8; W]>,
+    ) -> Result<(), String> {
+        let n = values.len();
+        if n == 0 {
+            return Ok(());
+        }
+        if self.depth > self.limits.depth {
+            return Err("wire node or depth limit".into());
+        }
+        let fit = self.limits.bytes.saturating_sub(self.out.len()) / (4 + W);
+        if n > self.remaining || n > fit {
+            // Frame by frame, element `remaining` fails its node check before
+            // element `fit` fails its byte check.
+            return Err(if self.remaining <= fit { "wire node or depth limit" } else { "wire byte limit" }.into());
+        }
+        self.remaining -= n;
+        self.out.reserve(n * (4 + W));
+        let header = (W as u32).to_le_bytes();
+        for value in values {
+            self.out.extend_from_slice(&header);
+            self.out.extend_from_slice(&value);
+        }
+        Ok(())
+    }
     /// Reorder a contiguous suffix using a checked permutation of its spans.
     /// Already ordered fields incur no copy. This supports unordered text records.
     pub fn reorder(&mut self, start: usize, spans: &[(usize, usize)]) -> Result<(), String> {
@@ -520,7 +549,7 @@ fn frame(bytes: &[u8], pos: usize) -> Result<(usize, usize), String> {
     }
     Ok((start, end))
 }
-fn walk(
+pub(crate) fn walk(
     s: &Schema,
     t: &Value,
     bytes: &[u8],
@@ -612,6 +641,36 @@ fn walk(
                 || t["kind"] == "vector" && Some(n as u64) != t["size"].as_u64()
             {
                 return Err(error());
+            }
+            if !materialize {
+                let element = s.resolve(&t["element"])?;
+                let width = match element["kind"].as_str() {
+                    Some("unit") => Some(0),
+                    Some("bool") => Some(1),
+                    Some("u32" | "i32" | "f32") => Some(4),
+                    Some("u64" | "f64") => Some(8),
+                    _ => None,
+                };
+                if let Some(width) = width {
+                    // Fixed-width scalars: the checks walking each element
+                    // frame makes, in one loop. n <= budget was checked, so
+                    // only the depth of the first element can fail `count`.
+                    if n > 0 && d + 1 > limits.depth {
+                        return Err("wire node or depth limit".into());
+                    }
+                    *budget -= n;
+                    for _ in 0..n {
+                        let (start, end) = frame(body, p)?;
+                        if end - start != width || width == 1 && body[start] > 1 {
+                            return Err(error());
+                        }
+                        p = end;
+                    }
+                    if p != body.len() {
+                        return Err(error());
+                    }
+                    return Ok(None);
+                }
             }
             let mut xs = vec![];
             for _ in 0..n {
@@ -726,6 +785,27 @@ impl<'a> Validated<'a> {
         } else {
             Err("wire nominal type mismatch".into())
         }
+    }
+    /// A validated list or vector of `kind` scalars `width` bytes wide: its
+    /// length and its element frames, each a 4-byte length then the value.
+    /// Validation checked every frame, so value i starts at
+    /// `i * (4 + width) + 4`. Same errors as reading the items one by one.
+    pub fn scalar_items(&self, kind: &str, width: usize) -> Result<(usize, &'a [u8]), String> {
+        let t = self.schema.resolve(self.ty)?;
+        if t["kind"] != "list" && t["kind"] != "vector" {
+            return Err("wire view is not a sequence".into());
+        }
+        let (a, b) = frame(self.bytes, 0)?;
+        let body = &self.bytes[a..b];
+        let n = u32_at(body, 0)? as usize;
+        if n > 0 && self.schema.resolve(&t["element"])?["kind"] != kind {
+            return Err("wire native type mismatch".into());
+        }
+        let items = &body[4..];
+        if items.len() != n.checked_mul(4 + width).ok_or("wire length overflow")? {
+            return Err("malformed wire value".into());
+        }
+        Ok((n, items))
     }
     /// Scalar bytes or a container body; safe to borrow for the witness lifetime.
     pub fn body(&self) -> Result<&'a [u8], String> {
